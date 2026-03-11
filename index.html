@@ -268,19 +268,52 @@
           </div>
         </div>
 
+        <!-- GitHub Gist Sync (primary) -->
         <div class="card settings-card">
-          <h3>☁️ Cloud Backup</h3>
+          <h3>☁️ Geräte-Sync via GitHub Gist</h3>
           <div class="settings-group">
-            <p class="setting-desc">Exportiere deine Daten als JSON-Datei und speichere sie in iCloud, Google Drive oder
-              OneDrive.</p>
+            <p class="setting-desc">Synchronisiere deine Trainingsdaten zwischen Handy und PC. Einmalige Einrichtung – danach automatisch.</p>
+
+            <div class="sync-status-bar" id="syncStatus" data-status="idle">☁️ Nicht konfiguriert</div>
+
+            <div class="setting-row" style="margin-top:12px;">
+              <label class="setting-label">GitHub Personal Access Token</label>
+              <input type="password" id="gistTokenInput" class="input-field" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+            </div>
+            <p class="setting-desc" style="font-size:0.72rem;margin-top:4px;">
+              Token erstellen: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained → nur <strong>Gists: Read & Write</strong>
+            </p>
+
+            <div class="gist-id-row" style="display:none;margin-top:8px;">
+              <label class="setting-label">Gist-ID (für andere Geräte)</label>
+              <input type="text" id="gistIdDisplay" class="input-field" placeholder="Wird nach erstem Push angezeigt">
+            </div>
+
+            <div class="backup-buttons" style="margin-top:12px;">
+              <button class="btn btn-primary" id="btnSaveGist">Token speichern</button>
+              <button class="btn btn-outline" id="btnGistPush">
+                ⬆️ Push (Hochladen)
+              </button>
+              <button class="btn btn-outline" id="btnGistPull">
+                ⬇️ Pull (Herunterladen)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Lokales Backup (Fallback) -->
+        <div class="card settings-card">
+          <h3>💾 Lokales Backup</h3>
+          <div class="settings-group">
+            <p class="setting-desc">Manuelles Backup als Datei – für Excel-Export oder Notfall-Wiederherstellung.</p>
             <div class="backup-buttons">
-              <button class="btn btn-primary" id="btnExportData">
+              <button class="btn btn-outline" id="btnExportData">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                   <polyline points="7 10 12 15 17 10" />
                   <line x1="12" y1="15" x2="12" y2="3" />
                 </svg>
-                Daten exportieren
+                JSON Export
               </button>
               <button class="btn btn-outline" id="btnImportData">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -288,7 +321,7 @@
                   <polyline points="17 8 12 3 7 8" />
                   <line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
-                Daten importieren
+                JSON Import
               </button>
               <button class="btn btn-outline" id="btnExportCSV"
                 title="Trainingsdaten als CSV Tabelle für Excel exportieren">

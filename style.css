@@ -2140,3 +2140,39 @@ input {
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
+
+/* --- Gist Sync UI --- */
+.sync-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+  transition: background 0.3s, border-color 0.3s;
+}
+.sync-status-bar[data-status="syncing"] {
+  background: rgba(59,130,246,0.12);
+  border-color: rgba(59,130,246,0.3);
+  animation: syncPulse 1.2s ease-in-out infinite;
+}
+.sync-status-bar[data-status="ok"] {
+  background: rgba(16,185,129,0.1);
+  border-color: rgba(16,185,129,0.3);
+}
+.sync-status-bar[data-status="error"] {
+  background: rgba(239,68,68,0.1);
+  border-color: rgba(239,68,68,0.3);
+}
+@keyframes syncPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.gist-id-row label { font-size: 0.78rem; }
+
+/* Token input: show dots but allow paste */
+#gistTokenInput { font-family: monospace; letter-spacing: 0.05em; }

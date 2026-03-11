@@ -6,7 +6,7 @@
   'use strict';
 
   // --- State ---
-  const STATE_VERSION = 1.2;
+  const STATE_VERSION = 1.1;
   let state = {
     stateVersion: STATE_VERSION,
     currentView: 'viewDashboard',
@@ -31,40 +31,19 @@
   function migrateState(parsed) {
     const version = parsed.stateVersion || 1.0;
     if (version < 1.1) {
-      // Migrate unilateral exercises: ensure feedback field exists
+      // Migrate unilateral exercises: old format stored L+R in flat sets array
+      // New format is the same flat array but we tag it with stateVersion
       if (parsed.sessions) {
         parsed.sessions.forEach(session => {
           session.exercises && session.exercises.forEach(ex => {
             if (ex.unilateral && ex.sets) {
+              // Ensure each set has a feedback field (may be missing in old data)
               ex.sets = ex.sets.map(s => ({ feedback: '', ...s }));
             }
           });
         });
       }
       parsed.stateVersion = 1.1;
-    }
-    if (version < 1.2) {
-      // Sync isBodyweightOnly and unilateral flags from canonical plan into customPlan.
-      // Needed when flags were added to data.js after customPlan was already cloned & stored.
-      if (parsed.customPlan) {
-        const allCanonicalDays = [...TRAINING_PLAN.cycleA, ...TRAINING_PLAN.cycleB];
-        const canonicalById = {};
-        allCanonicalDays.forEach(function(day) {
-          day.exercises.forEach(function(ex) { canonicalById[ex.id] = ex; });
-        });
-        const allCustomDays = [...parsed.customPlan.cycleA, ...parsed.customPlan.cycleB];
-        allCustomDays.forEach(function(day) {
-          day.exercises.forEach(function(ex) {
-            const canonical = canonicalById[ex.id];
-            if (canonical) {
-              if (canonical.isBodyweightOnly) ex.isBodyweightOnly = true;
-              if (canonical.unilateral) ex.unilateral = true;
-              if (canonical.noTracking) ex.noTracking = true;
-            }
-          });
-        });
-      }
-      parsed.stateVersion = 1.2;
     }
     return parsed;
   }
@@ -140,7 +119,163 @@
     } catch (e) { console.warn('Flush save failed:', e); }
   }
 
-  // --- Wake Lock ---
+  // --- Gist Cloud Sync ---
+  const GIST_TOKEN_KEY = 'ppl8_gist_token';
+  const GIST_ID_KEY    = 'ppl8_gist_id';
+  let _syncStatus = 'idle'; // idle | syncing | ok | error
+
+  function gistGetToken() { return localStorage.getItem(GIST_TOKEN_KEY) || ''; }
+  function gistGetId()    { return localStorage.getItem(GIST_ID_KEY) || ''; }
+
+  function gistSetSyncStatus(status, msg) {
+    _syncStatus = status;
+    const el = document.getElementById('syncStatus');
+    if (!el) return;
+    const icons = { idle: '☁️', syncing: '🔄', ok: '✅', error: '❌' };
+    el.textContent = (icons[status] || '☁️') + ' ' + (msg || '');
+    el.dataset.status = status;
+  }
+
+  // Build the payload we store in the Gist file
+  function gistBuildPayload() {
+    return JSON.stringify({
+      stateVersion: STATE_VERSION,
+      syncedAt: new Date().toISOString(),
+      znsBaseline: state.znsBaseline,
+      athlete: state.athlete,
+      sessions: state.sessions,
+      customPlan: state.customPlan,
+      lastBackup: state.lastBackup
+    }, null, 2);
+  }
+
+  // Push local state → Gist (creates Gist if no ID stored yet)
+  async function gistPush() {
+    const token = gistGetToken();
+    if (!token) { toast('⚙️ Bitte zuerst GitHub Token in Einstellungen hinterlegen.'); return; }
+    gistSetSyncStatus('syncing', 'Wird gespeichert…');
+    try {
+      const payload = gistBuildPayload();
+      const existingId = gistGetId();
+      let url = 'https://api.github.com/gists';
+      let method = 'POST';
+      let body = {
+        description: 'PPL-8 Training Tracker Sync',
+        public: false,
+        files: { 'ppl8_data.json': { content: payload } }
+      };
+      if (existingId) {
+        url = `https://api.github.com/gists/${existingId}`;
+        method = 'PATCH';
+        body = { files: { 'ppl8_data.json': { content: payload } } };
+      }
+      const res = await fetch(url, {
+        method,
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28'
+        },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (!existingId) {
+        localStorage.setItem(GIST_ID_KEY, data.id);
+        // Show the Gist ID so user can copy it to other devices
+        const idEl = document.getElementById('gistIdDisplay');
+        if (idEl) { idEl.value = data.id; idEl.closest('.gist-id-row') && (idEl.closest('.gist-id-row').style.display = ''); }
+      }
+      state.lastBackup = new Date().toISOString();
+      saveState();
+      gistSetSyncStatus('ok', 'Gespeichert ' + new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }));
+      toast('☁️ Cloud Sync erfolgreich!');
+    } catch (e) {
+      console.error('Gist push failed:', e);
+      gistSetSyncStatus('error', e.message);
+      toast('❌ Sync fehlgeschlagen: ' + e.message);
+    }
+  }
+
+  // Pull Gist → merge into local state (newer wins by syncedAt timestamp)
+  async function gistPull() {
+    const token = gistGetToken();
+    const gistId = gistGetId();
+    if (!token) { toast('⚙️ Bitte zuerst GitHub Token hinterlegen.'); return; }
+    if (!gistId) { toast('⚙️ Keine Gist-ID gespeichert. Erst Push durchführen oder ID eintragen.'); return; }
+    gistSetSyncStatus('syncing', 'Wird geladen…');
+    try {
+      const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'X-GitHub-Api-Version': '2022-11-28'
+        }
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || `HTTP ${res.status}`);
+      }
+      const gist = await res.json();
+      const fileContent = gist.files['ppl8_data.json'] && gist.files['ppl8_data.json'].content;
+      if (!fileContent) throw new Error('Datei nicht im Gist gefunden');
+      const remote = JSON.parse(fileContent);
+
+      // Conflict resolution: merge sessions (union by id), remote wins for athlete/baseline if newer
+      const localTime  = state.lastBackup ? new Date(state.lastBackup).getTime() : 0;
+      const remoteTime = remote.syncedAt   ? new Date(remote.syncedAt).getTime()  : 0;
+
+      // Always merge sessions: combine both, deduplicate by session id
+      const allSessions = [...(state.sessions || []), ...(remote.sessions || [])];
+      const seen = new Set();
+      const mergedSessions = allSessions.filter(s => {
+        if (seen.has(s.id)) return false;
+        seen.add(s.id);
+        return true;
+      });
+      mergedSessions.sort((a, b) => new Date(a.date) - new Date(b.date));
+      state.sessions = mergedSessions;
+
+      // For scalar fields: remote wins only if it is newer
+      if (remoteTime > localTime) {
+        if (remote.athlete)     state.athlete     = remote.athlete;
+        if (remote.znsBaseline) state.znsBaseline = remote.znsBaseline;
+        if (remote.customPlan)  state.customPlan  = remote.customPlan;
+      }
+
+      state.lastBackup = new Date().toISOString();
+      saveState();
+      renderDashboard();
+      gistSetSyncStatus('ok', 'Synchronisiert ' + new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }));
+      toast('☁️ Daten synchronisiert! ' + mergedSessions.length + ' Sessions geladen.');
+    } catch (e) {
+      console.error('Gist pull failed:', e);
+      gistSetSyncStatus('error', e.message);
+      toast('❌ Pull fehlgeschlagen: ' + e.message);
+    }
+  }
+
+  // Save token + optional gist ID from settings UI
+  function saveGistSettings() {
+    const token = (document.getElementById('gistTokenInput') || {}).value || '';
+    const gistId = (document.getElementById('gistIdDisplay') || {}).value || '';
+    if (!token) { toast('Bitte Token eingeben'); return; }
+    localStorage.setItem(GIST_TOKEN_KEY, token.trim());
+    if (gistId.trim()) localStorage.setItem(GIST_ID_KEY, gistId.trim());
+    toast('✅ Einstellungen gespeichert');
+    gistSetSyncStatus('idle', 'Token gespeichert');
+  }
+
+  // Auto-pull on app start if token + gist id exist
+  async function gistAutoSync() {
+    if (gistGetToken() && gistGetId()) {
+      await gistPull();
+    }
+  }
+
+    // --- Wake Lock ---
   async function requestWakeLock() {
     if (!('wakeLock' in navigator)) return;
     try {
@@ -921,6 +1056,11 @@
     show($('bottomNav'));
     switchView('viewDashboard');
     toast(`Training gespeichert! (${elapsed} Min)`);
+
+    // Auto-push to Gist if configured
+    if (gistGetToken() && gistGetId()) {
+      setTimeout(() => gistPush(), 800);
+    }
   }
 
   function backFromWorkout() {
@@ -1484,7 +1624,23 @@
     $('importFileInput').addEventListener('change', handleImport);
     $('btnEditPlan').addEventListener('click', openPlanEditor);
     $('btnResetData').addEventListener('click', resetData);
-    $('btnBackup').addEventListener('click', exportData);
+    $('btnBackup').addEventListener('click', () => {
+      if (gistGetToken()) { gistPush(); } else { exportData(); }
+    });
+
+    // Gist Sync
+    const btnGistPush = document.getElementById('btnGistPush');
+    const btnGistPull = document.getElementById('btnGistPull');
+    const btnSaveGist = document.getElementById('btnSaveGist');
+    if (btnGistPush) btnGistPush.addEventListener('click', gistPush);
+    if (btnGistPull) btnGistPull.addEventListener('click', gistPull);
+    if (btnSaveGist) btnSaveGist.addEventListener('click', saveGistSettings);
+
+    // Populate token field if already stored
+    const tokenInput = document.getElementById('gistTokenInput');
+    const idInput = document.getElementById('gistIdDisplay');
+    if (tokenInput && gistGetToken()) tokenInput.value = gistGetToken();
+    if (idInput && gistGetId()) { idInput.value = gistGetId(); const row = idInput.closest('.gist-id-row'); if (row) row.style.display = ''; }
 
     // Workout Extra
     const btnCloseRestTimer = document.getElementById('btnCloseRestTimer');
@@ -1601,6 +1757,9 @@
     }
 
     renderDashboard();
+
+    // Auto-pull from Gist on startup (after UI is ready)
+    setTimeout(() => gistAutoSync(), 1600);
 
     // Service Worker with graceful update detection
     if ('serviceWorker' in navigator) {

@@ -290,12 +290,15 @@
             </div>
 
             <div class="backup-buttons" style="margin-top:12px;">
-              <button class="btn btn-primary" id="btnSaveGist">Token speichern</button>
-              <button class="btn btn-outline" id="btnGistPush">
+              <button class="btn btn-primary" id="btnSaveGist" onclick="window.gistSaveSettings()">Token speichern</button>
+              <button class="btn btn-outline" id="btnGistPush" onclick="window.gistPushData()">
                 ⬆️ Push (Hochladen)
               </button>
-              <button class="btn btn-outline" id="btnGistPull">
+              <button class="btn btn-outline" id="btnGistPull" onclick="window.gistPullData()">
                 ⬇️ Pull (Herunterladen)
+              </button>
+              <button class="btn btn-outline" id="btnGistDiag" onclick="window.gistDiagnose()" style="font-size:0.8rem;opacity:0.7;">
+                🔍 Verbindung testen
               </button>
             </div>
           </div>

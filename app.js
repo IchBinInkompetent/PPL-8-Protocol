@@ -269,11 +269,13 @@
   function saveGistSettings() {
     const token = (document.getElementById('gistTokenInput') || {}).value || '';
     const gistId = (document.getElementById('gistIdDisplay') || {}).value || '';
-    if (!token) { toast('Bitte Token eingeben'); return; }
-    localStorage.setItem(GIST_TOKEN_KEY, token.trim());
+    if (!token) { toast('⚠️ Bitte Token in das Textfeld eingeben'); return; }
+    const trimmed = token.trim();
+    localStorage.setItem(GIST_TOKEN_KEY, trimmed);
     if (gistId.trim()) localStorage.setItem(GIST_ID_KEY, gistId.trim());
-    toast('✅ Token gespeichert');
-    gistSetSyncStatus('idle', 'Token gespeichert – Push starten');
+    const preview = trimmed.slice(0, 12) + '…';
+    toast('✅ Token gespeichert: ' + preview);
+    gistSetSyncStatus('idle', 'Bereit – Token: ' + preview);
   }
 
   // Auto-pull on app start if token + gist id exist
@@ -1697,6 +1699,46 @@
   }
 
   // --- Public API ---
+  // Expose gist functions globally for inline onclick handlers
+  window.gistPushData     = gistPush;
+  window.gistPullData     = gistPull;
+  window.gistSaveSettings = saveGistSettings;
+  window.gistDiagnose     = async function() {
+    const tokenEl = document.getElementById('gistTokenInput');
+    const token   = (tokenEl && tokenEl.value.trim()) || gistGetToken();
+    const toastEl = document.getElementById('toast');
+    const msgEl   = document.getElementById('toastMsg');
+    const show    = (msg, dur) => {
+      msgEl.textContent = msg;
+      toastEl.style.cursor = '';
+      toastEl.classList.remove('hidden');
+      if (dur !== 0) setTimeout(() => toastEl.classList.add('hidden'), dur || 4000);
+    };
+
+    if (!token) { show('⚠️ Kein Token im Feld – bitte eintragen und Token speichern drücken', 4000); return; }
+    show('🔄 Teste GitHub API…', 0);
+    try {
+      const res = await fetch('https://api.github.com/user', {
+        headers: {
+          'Authorization': 'token ' + token,
+          'X-GitHub-Api-Version': '2022-11-28'
+        }
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        show('✅ Token gültig! User: ' + (body.login || '?') + ' – jetzt Push versuchen', 4000);
+      } else if (res.status === 401) {
+        show('❌ 401: Token ungültig oder abgelaufen. Neu generieren.', 5000);
+      } else if (res.status === 403) {
+        show('❌ 403: Zugriff verweigert. Gist-Berechtigung prüfen.', 5000);
+      } else {
+        show('❌ HTTP ' + res.status + ': ' + (body.message || 'Unbekannter Fehler'), 5000);
+      }
+    } catch(e) {
+      show('❌ Netzwerkfehler: ' + e.message + ' (CORS?)', 6000);
+    }
+  };
+
   window.app = {
     openWorkout, toggleExercise, updateSet, updateExNotes, updateExSetup, toggleSetDone, toggleActivityDone,
     showExInfo, showExChart, showSessionDetail, deleteSession, startTimer,

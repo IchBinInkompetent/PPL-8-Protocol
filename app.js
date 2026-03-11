@@ -60,8 +60,9 @@
   }
 
   // Non-blocking async save with requestIdleCallback
-  function saveState() {
-    const toSave = {
+  // Single source of truth for persisted state shape — add new fields here only
+  function buildSavePayload() {
+    return {
       stateVersion: STATE_VERSION,
       znsBaseline: state.znsBaseline,
       athlete: state.athlete,
@@ -71,9 +72,12 @@
       activeSession: state.activeSession,
       workoutStartTime: state.workoutStartTime
     };
+  }
+
+  function saveState() {
     const doSave = () => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(buildSavePayload()));
       } catch (e) {
         if (e.name === 'QuotaExceededError') {
           toast('⚠️ Speicher voll! Bitte Backup erstellen und alte Daten löschen.');
@@ -105,17 +109,7 @@
       _saveDebounceTimer = null;
     }
     try {
-      const toSave = {
-        stateVersion: STATE_VERSION,
-        znsBaseline: state.znsBaseline,
-        athlete: state.athlete,
-        sessions: state.sessions,
-        customPlan: state.customPlan,
-        lastBackup: state.lastBackup,
-        activeSession: state.activeSession,
-        workoutStartTime: state.workoutStartTime
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(buildSavePayload()));
     } catch (e) { console.warn('Flush save failed:', e); }
   }
 
@@ -583,23 +577,48 @@
     }
   }
 
+  // Branded confirm dialog — avoids native browser confirm() which blocks thread and breaks iOS design
+  function showConfirm(message, onConfirm, onCancel, { confirmLabel = 'Ja', cancelLabel = 'Abbrechen' } = {}) {
+    $('modalContent').innerHTML = `
+      <div class="modal-header">
+        <h3>Hinweis</h3>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:0.9rem;line-height:1.55;color:var(--text-secondary);margin-bottom:var(--gap-md);">${message}</p>
+        <div style="display:flex;gap:var(--gap-sm);justify-content:flex-end;">
+          <button class="btn btn-outline btn-sm" id="confirmCancel">${cancelLabel}</button>
+          <button class="btn btn-primary btn-sm" id="confirmOk">${confirmLabel}</button>
+        </div>
+      </div>
+    `;
+    show($('modalOverlay'));
+    $('confirmOk').addEventListener('click', () => { hide($('modalOverlay')); onConfirm(); });
+    $('confirmCancel').addEventListener('click', () => { hide($('modalOverlay')); if (onCancel) onCancel(); });
+  }
+
   // --- Workout View ---
   function openWorkout(cycle, dayIndex) {
     const days = getDays(cycle);
     const day = days[dayIndex];
 
-    // Draft check
+    // Draft check — uses branded modal instead of native confirm()
     if (state.activeSession) {
       if (state.activeSession.cycle === cycle && state.activeSession.dayIndex === dayIndex) {
-        if (confirm('Es existiert ein ungespeichertes Training als Entwurf. Möchtest du es fortsetzen?')) {
-          resumeWorkout(cycle, dayIndex);
-          return;
-        } else {
-          state.activeSession = null; // discard
-        }
+        showConfirm(
+          'Es existiert ein ungespeichertes Training als Entwurf. Möchtest du es fortsetzen?',
+          () => resumeWorkout(cycle, dayIndex),
+          () => { state.activeSession = null; openWorkout(cycle, dayIndex); },
+          { confirmLabel: 'Fortsetzen', cancelLabel: 'Neu starten' }
+        );
+        return;
       } else {
-        if (!confirm('Es gibt ein anderes ungespeichertes Training. Möchtest du es verwerfen und ein neues starten?')) return;
-        state.activeSession = null;
+        showConfirm(
+          'Es gibt ein anderes ungespeichertes Training. Möchtest du es verwerfen und ein neues starten?',
+          () => { state.activeSession = null; openWorkout(cycle, dayIndex); },
+          null,
+          { confirmLabel: 'Verwerfen & neu', cancelLabel: 'Abbrechen' }
+        );
+        return;
       }
     }
 
@@ -898,6 +917,12 @@
     while (tmp.firstChild) frag.appendChild(tmp.firstChild);
     list.innerHTML = '';
     list.appendChild(frag);
+
+    // Mark prefilled weight inputs — CSS attribute selectors don't pick up JS-set values reliably
+    list.querySelectorAll('input.input-sm[id^="w_"]').forEach(input => {
+      input.classList.toggle('has-value', input.value !== '');
+      input.addEventListener('input', () => input.classList.toggle('has-value', input.value !== ''), { passive: true });
+    });
   }
 
   function toggleExercise(idx) {
@@ -1144,7 +1169,6 @@
 
     $('infoModalTitle').textContent = ex.name;
     $('infoModalBody').innerHTML = `
-    <div class="skeleton-pulse skeleton-img" title="Übungsgrafik (demnächst verfügbar)"></div>
     <p><strong>Sets × Reps:</strong> ${ex.sets}x ${ex.reps}${ex.tempo ? ` | Tempo: ${ex.tempo}` : ''}</p>
     ${ex.note ? `<div class="tip-box">📌 ${ex.note}</div>` : ''}
     <h4>Korrekte Ausführung</h4>
@@ -1395,14 +1419,17 @@
         ${session.exercises.map(ex => `
           <div class="history-detail-exercise">
             <h5>${ex.name}</h5>
-            ${ex.sets.map((s, i) => `
+            ${ex.noTracking
+              ? `<p style="font-size:0.78rem;color:var(--text-muted);">${ex.done ? '✅ Erledigt' : '⭕ Nicht abgehakt'}</p>`
+              : (ex.sets || []).map((s, i) => `
               <div class="history-detail-set">
                 <span>Satz ${i + 1}</span>
                 <span>${s.weight || '-'} kg</span>
                 <span>${s.reps || '-'} Reps</span>
                 <span>RIR ${s.rir || '-'}</span>
               </div>
-            `).join('')}
+            `).join('')
+            }
           </div>
         `).join('')}
       </div>
@@ -1416,13 +1443,19 @@
   }
 
   function deleteSession(id) {
-    if (!confirm('Training wirklich löschen?')) return;
-    state.sessions = state.sessions.filter(s => s.id !== id);
-    saveState();
-    hide($('modalOverlay'));
-    renderHistory();
-    renderDashboard();
-    toast('Training gelöscht');
+    showConfirm(
+      'Training wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.',
+      () => {
+        state.sessions = state.sessions.filter(s => s.id !== id);
+        saveState();
+        hide($('modalOverlay'));
+        renderHistory();
+        renderDashboard();
+        toast('Training gelöscht');
+      },
+      null,
+      { confirmLabel: 'Löschen', cancelLabel: 'Abbrechen' }
+    );
   }
 
   // --- Cloud Backup (Export/Import) ---
@@ -1527,36 +1560,77 @@
   }
 
   function addExercisePrompt(dayIdx) {
-    const name = prompt('Übungsname:');
-    if (!name) return;
-    const sets = parseInt(prompt('Anzahl Sätze:', '2')) || 2;
-    const reps = prompt('Wiederholungen:', '8-12') || '8-12';
+    // Use branded modal instead of native prompt() — blocked on iOS PWA
+    $('modalContent').innerHTML = `
+      <div class="modal-header">
+        <h3>Übung hinzufügen</h3>
+        <button class="btn-close" onclick="document.getElementById('modalOverlay').classList.add('hidden')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div>
+            <label style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px;">Übungsname</label>
+            <input id="addExName" type="text" class="input-field" placeholder="z.B. Schrägbank Drücken">
+          </div>
+          <div style="display:flex;gap:8px;">
+            <div style="flex:1;">
+              <label style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px;">Sätze</label>
+              <input id="addExSets" type="number" class="input-field" value="2" min="1" max="10" inputmode="numeric">
+            </div>
+            <div style="flex:1;">
+              <label style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px;">Wiederholungen</label>
+              <input id="addExReps" type="text" class="input-field" value="8-12" placeholder="8-12">
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:4px;">
+            <button class="btn btn-outline btn-sm" id="addExCancel" style="flex:1;">Abbrechen</button>
+            <button class="btn btn-primary btn-sm" id="addExConfirm" style="flex:1;">Hinzufügen</button>
+          </div>
+        </div>
+      </div>
+    `;
+    show($('modalOverlay'));
+    window.history.pushState({ modal: 'overlay' }, '');
 
-    // Create custom plan if needed
-    if (!state.customPlan) {
-      state.customPlan = JSON.parse(JSON.stringify(TRAINING_PLAN));
-    }
-    const allDays = [...state.customPlan.cycleA, ...state.customPlan.cycleB];
-    allDays[dayIdx].exercises.push({
-      id: 'custom_' + Date.now(),
-      name, sets, reps, tempo: null, note: '',
-      guide: 'Noch keine Anleitung hinterlegt. Tippe auf ✏️ in den Einstellungen um eine Anleitung hinzuzufügen.'
+    $('addExName').focus();
+    $('addExName').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('addExConfirm').click(); });
+    $('addExCancel').addEventListener('click', () => { hide($('modalOverlay')); openPlanEditor(); });
+    $('addExConfirm').addEventListener('click', () => {
+      const name = ($('addExName').value || '').trim();
+      if (!name) { $('addExName').focus(); return; }
+      const sets = parseInt($('addExSets').value) || 2;
+      const reps = ($('addExReps').value || '8-12').trim();
+
+      if (!state.customPlan) state.customPlan = JSON.parse(JSON.stringify(TRAINING_PLAN));
+      const allDays = [...state.customPlan.cycleA, ...state.customPlan.cycleB];
+      allDays[dayIdx].exercises.push({
+        id: 'custom_' + Date.now(),
+        name, sets, reps, tempo: null, note: '',
+        guide: 'Noch keine Anleitung hinterlegt.'
+      });
+      saveState();
+      hide($('modalOverlay'));
+      openPlanEditor();
+      toast('Übung hinzugefügt ✅');
     });
-    saveState();
-    openPlanEditor();
-    toast('Übung hinzugefügt');
   }
 
   function removeExercise(dayIdx, exIdx) {
-    if (!confirm('Übung wirklich entfernen?')) return;
-    if (!state.customPlan) {
-      state.customPlan = JSON.parse(JSON.stringify(TRAINING_PLAN));
-    }
-    const allDays = [...state.customPlan.cycleA, ...state.customPlan.cycleB];
-    allDays[dayIdx].exercises.splice(exIdx, 1);
-    saveState();
-    openPlanEditor();
-    toast('Übung entfernt');
+    showConfirm(
+      'Übung wirklich aus dem Plan entfernen?',
+      () => {
+        if (!state.customPlan) {
+          state.customPlan = JSON.parse(JSON.stringify(TRAINING_PLAN));
+        }
+        const allDays = [...state.customPlan.cycleA, ...state.customPlan.cycleB];
+        allDays[dayIdx].exercises.splice(exIdx, 1);
+        saveState();
+        openPlanEditor();
+        toast('Übung entfernt');
+      },
+      null,
+      { confirmLabel: 'Entfernen', cancelLabel: 'Abbrechen' }
+    );
   }
 
   // --- Settings ---
@@ -1573,14 +1647,25 @@
   }
 
   function resetData() {
-    if (!confirm('ALLE Trainingsdaten unwiderruflich löschen?')) return;
-    if (!confirm('Wirklich sicher? Erstelle vorher ein Backup!')) return;
-    localStorage.removeItem(STORAGE_KEY);
-    state.sessions = [];
-    state.customPlan = null;
-    state.znsBaseline = null;
-    renderDashboard();
-    toast('Alle Daten gelöscht');
+    // Two-step confirmation for destructive action — first modal leads to second
+    showConfirm(
+      'ALLE Trainingsdaten unwiderruflich löschen? Diese Aktion kann nicht rückgängig gemacht werden!',
+      () => showConfirm(
+        'Wirklich sicher? Erstelle vorher ein Backup in den Einstellungen!',
+        () => {
+          localStorage.removeItem(STORAGE_KEY);
+          state.sessions = [];
+          state.customPlan = null;
+          state.znsBaseline = null;
+          renderDashboard();
+          toast('Alle Daten gelöscht');
+        },
+        null,
+        { confirmLabel: '⚠️ Endgültig löschen', cancelLabel: 'Abbrechen' }
+      ),
+      null,
+      { confirmLabel: 'Ja, löschen', cancelLabel: 'Abbrechen' }
+    );
   }
 
   // --- Toggle helpers ---
@@ -1610,6 +1695,7 @@
 
     // ZNS
     $('btnZnsCheck').addEventListener('click', checkZns);
+    $('znsInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') checkZns(); });
     $('btnSetBaseline').addEventListener('click', () => {
       switchView('viewSettings');
       $('settingBaseline').focus();
@@ -1618,8 +1704,8 @@
     // System toggle
     $('btnSystemToggle').addEventListener('click', () => toggleCollapsible('systemBody', 'btnSystemToggle'));
 
-    // Warmup toggle
-    $('btnWarmupToggle').addEventListener('click', () => toggleCollapsible('warmupBody'));
+    // Warmup toggle — pass expand button ID so the chevron rotates
+    $('btnWarmupToggle').addEventListener('click', () => toggleCollapsible('warmupBody', 'btnWarmupExpand'));
 
     // Workout
     $('btnFinishWorkout').addEventListener('click', finishWorkout);

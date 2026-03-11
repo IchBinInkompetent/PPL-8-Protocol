@@ -172,7 +172,7 @@
       const res = await fetch(url, {
         method,
         headers: {
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `${token.startsWith('github_pat_') ? 'token' : 'Bearer'} ${token}`,
           'Content-Type': 'application/json',
           'X-GitHub-Api-Version': '2022-11-28'
         },
@@ -180,7 +180,11 @@
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || `HTTP ${res.status}`);
+        const detail = err.message || '';
+        const hint = res.status === 401 ? ' (Token ungültig oder abgelaufen)' :
+                     res.status === 403 ? ' (Token hat keine Gist-Berechtigung)' :
+                     res.status === 404 ? ' (Gist nicht gefunden – bitte neue Gist-ID)' : '';
+        throw new Error(`HTTP ${res.status}${hint}${detail ? ': ' + detail : ''}`);
       }
       const data = await res.json();
       if (!existingId) {
@@ -210,13 +214,17 @@
     try {
       const res = await fetch(`https://api.github.com/gists/${gistId}`, {
         headers: {
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `${token.startsWith('github_pat_') ? 'token' : 'Bearer'} ${token}`,
           'X-GitHub-Api-Version': '2022-11-28'
         }
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || `HTTP ${res.status}`);
+        const detail = err.message || '';
+        const hint = res.status === 401 ? ' (Token ungültig oder abgelaufen)' :
+                     res.status === 403 ? ' (Token hat keine Gist-Berechtigung)' :
+                     res.status === 404 ? ' (Gist-ID nicht gefunden)' : '';
+        throw new Error(`HTTP ${res.status}${hint}${detail ? ': ' + detail : ''}`);
       }
       const gist = await res.json();
       const fileContent = gist.files['ppl8_data.json'] && gist.files['ppl8_data.json'].content;
@@ -264,8 +272,8 @@
     if (!token) { toast('Bitte Token eingeben'); return; }
     localStorage.setItem(GIST_TOKEN_KEY, token.trim());
     if (gistId.trim()) localStorage.setItem(GIST_ID_KEY, gistId.trim());
-    toast('✅ Einstellungen gespeichert');
-    gistSetSyncStatus('idle', 'Token gespeichert');
+    toast('✅ Token gespeichert');
+    gistSetSyncStatus('idle', 'Token gespeichert – Push starten');
   }
 
   // Auto-pull on app start if token + gist id exist

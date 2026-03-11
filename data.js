@@ -62,7 +62,7 @@ const TRAINING_PLAN = {
                     guide: "Rücken zum Kabelzug, Seil hinter dem Kopf. Ellenbogen zeigen nach oben und bleiben fixiert. Unterarme strecken. Die Überkopf-Position bringt den langen Trizepskopf in eine gestreckte Position und maximiert dessen Aktivierung."
                 },
                 {
-                    id: "a1e6", name: "Hanging Leg Raises", sets: 2, reps: "max", tempo: null, note: "Bis technisches Versagen. Kick-Prep.",
+                    id: "a1e6", name: "Hanging Leg Raises", sets: 2, reps: "max", tempo: null, isBodyweightOnly: true, note: "Bis technisches Versagen. Kick-Prep.",
                     guide: "An der Klimmzugstange hängen, Schulterblätter aktiv nach unten ziehen. Beine gestreckt nach oben führen (min. 90°). Kein Schwung! Kontrolliert absenken. Bereitet die Hüftflexion und Rumpfstabilität für Kicks vor."
                 }
             ]
@@ -72,11 +72,11 @@ const TRAINING_PLAN = {
             subtitle: "Front Lever Prep & Mid-Back Diversification",
             exercises: [
                 {
-                    id: "a2e1", name: "Tuck Front Lever Holds", sets: 3, reps: "5-10 Sek.", tempo: null, note: "Skill-Work bei frischem ZNS.",
+                    id: "a2e1", name: "Tuck Front Lever Holds", sets: 3, reps: "5-10 Sek.", tempo: null, isBodyweightOnly: true, note: "Skill-Work bei frischem ZNS.",
                     guide: "An der Stange hängen, Knie zur Brust ziehen (Tuck-Position). Körper horizontal ausrichten. Schulterblätter nach hinten-unten ziehen. Lats und Core maximal anspannen. Position halten. Wird als erstes bei frischem ZNS trainiert, da es maximale neuronale Ansteuerung erfordert."
                 },
                 {
-                    id: "a2e2", name: "Explosive High Pull-Ups", sets: 4, reps: "3", tempo: null, note: "Nur Körpergewicht. Fokus: RFD / Speed.",
+                    id: "a2e2", name: "Explosive High Pull-Ups", sets: 4, reps: "3", tempo: null, isBodyweightOnly: true, note: "Nur Körpergewicht. Fokus: RFD / Speed.",
                     guide: "Schulterbreiter Griff. EXPLOSIV nach oben ziehen mit dem Ziel, die Brust über die Stange zu bringen. Maximale Kraftentwicklungsrate (RFD). Kontrolliert absenken. Niedrige Reps, maximale Geschwindigkeit – trainiert die schnelle Kraftentfaltung."
                 },
                 {
@@ -88,7 +88,7 @@ const TRAINING_PLAN = {
                     guide: "Brust auf die Polsterung legen. Breiter Griff. Ellenbogen nach außen führen (ca. 60-70°). Schulterblätter am oberen Punkt maximal zusammenziehen. Der breite Griff und die Ellenbogenrichtung verlagern den Fokus auf Rhomboiden und mittleren Trapezius statt auf die Lats."
                 },
                 {
-                    id: "a2e5", name: "Single-Arm Cable Iliac Pulldown", sets: 2, reps: "10-12/Seite", tempo: null, note: "Fokus auf den V-Taper Cut.",
+                    id: "a2e5", name: "Single-Arm Cable Iliac Pulldown", sets: 2, reps: "10-12/Seite", tempo: null, unilateral: true, note: "Fokus auf den V-Taper Cut.",
                     guide: "Einarmig am Kabelzug. Arm gestreckt starten, nach unten Richtung Hüftknochen (Iliac Crest) ziehen. Maximale Lat-Kontraktion am tiefsten Punkt. Unilateral für Symmetrie und intensivere Aktivierung des unteren Lat-Ansatzes."
                 },
                 {
@@ -118,7 +118,7 @@ const TRAINING_PLAN = {
                     guide: "Sitzend, Polster auf den Knien. Im tiefsten Punkt maximale Dehnung der Wade (2 Sek. halten). Explosiv hochdrücken, oben 1 Sek. Squeeze. Der Soleus wird sitzend besser aktiviert als stehend und ist für die Achillessehnen-Gesundheit entscheidend."
                 },
                 {
-                    id: "a3e5", name: "Ab-Wheel Rollouts", sets: 2, reps: "8-12", tempo: null, note: "Anti-Extension.",
+                    id: "a3e5", name: "Ab-Wheel Rollouts", sets: 2, reps: "8-12", tempo: null, isBodyweightOnly: true, note: "Anti-Extension.",
                     guide: "Auf den Knien, Ab-Wheel vor dem Körper. Kontrolliert nach vorne rollen, dabei den Core MAXIMAL anspannen um eine Überstreckung der Lendenwirbelsäule zu verhindern (Anti-Extension). Nur so weit rollen, wie die LWS neutral bleibt. Zurückrollen."
                 }
             ]
@@ -144,7 +144,7 @@ const TRAINING_PLAN = {
             subtitle: "PAP-Effekt & Eccentric Damage",
             exercises: [
                 {
-                    id: "b5e1", name: "Depth Jumps (Dunk-Prep)", sets: 4, reps: "3", tempo: null, note: "Neural Primer. PAP fernab des Beintrainings.",
+                    id: "b5e1", name: "Depth Jumps (Dunk-Prep)", sets: 4, reps: "3", tempo: null, isBodyweightOnly: true, note: "Neural Primer. PAP fernab des Beintrainings.",
                     guide: "Von einer Box (30-50cm) absteigen, sofort maximal hochspringen. MINIMALE Bodenkontaktzeit. Der PAP-Effekt (Post-Activation Potentiation) aktiviert das ZNS für die folgenden Übungen. Bewusst am Push-Tag platziert, nicht am Beintag, um die Beinmuskulatur frisch zu halten."
                 },
                 {
@@ -186,7 +186,7 @@ const TRAINING_PLAN = {
                     guide: "Brust auf einer Schrägbank liegend, Dumbbells hängen lassen. Schulterblätter nach oben und zusammen ziehen (Shrug + Retraktion). Da die Wirbelsäule nicht axial belastet wird (Brust liegt auf), kann der Trapezius ohne Kompressionsstress trainiert werden. Bei 2.00m besonders wichtig!"
                 },
                 {
-                    id: "b6e4", name: "Decline Reverse Crunches", sets: 2, reps: "max", tempo: null, note: "4-5 Sek. Exzentrik. LWS-sicher für Front Lever.",
+                    id: "b6e4", name: "Decline Reverse Crunches", sets: 2, reps: "max", tempo: null, isBodyweightOnly: true, note: "4-5 Sek. Exzentrik. LWS-sicher für Front Lever.",
                     guide: "Auf der Negativbank, Hände oben festhalten. Becken maximal zum Brustkorb einrollen (posteriore Beckenrotation). Dann 4-5 Sekunden LANGSAM die Beine absenken (exzentrische Bremsphase). Trainiert die Core-Kontrolle, die für den Front Lever Transfer entscheidend ist, ohne die LWS zu belasten."
                 },
                 {

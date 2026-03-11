@@ -6,7 +6,9 @@
   'use strict';
 
   // --- State ---
+  const STATE_VERSION = 1.2;
   let state = {
+    stateVersion: STATE_VERSION,
     currentView: 'viewDashboard',
     currentCycle: 'A',
     activeDayIndex: null,
@@ -16,34 +18,138 @@
     znsBaseline: null,
     athlete: { height: 200, weight: 94, bodyFat: 13 },
     sessions: [],
-    customPlan: null, // null = use default
+    customPlan: null,
     lastBackup: null
   };
 
   // --- Storage ---
   const STORAGE_KEY = 'ppl8_tracker_data';
+  let _saveDebounceTimer = null;
+  let _wakeLock = null;
+
+  // Migration pipeline: transforms legacy state to current schema
+  function migrateState(parsed) {
+    const version = parsed.stateVersion || 1.0;
+    if (version < 1.1) {
+      // Migrate unilateral exercises: ensure feedback field exists
+      if (parsed.sessions) {
+        parsed.sessions.forEach(session => {
+          session.exercises && session.exercises.forEach(ex => {
+            if (ex.unilateral && ex.sets) {
+              ex.sets = ex.sets.map(s => ({ feedback: '', ...s }));
+            }
+          });
+        });
+      }
+      parsed.stateVersion = 1.1;
+    }
+    if (version < 1.2) {
+      // Sync isBodyweightOnly and unilateral flags from canonical plan into customPlan.
+      // Needed when flags were added to data.js after customPlan was already cloned & stored.
+      if (parsed.customPlan) {
+        const allCanonicalDays = [...TRAINING_PLAN.cycleA, ...TRAINING_PLAN.cycleB];
+        const canonicalById = {};
+        allCanonicalDays.forEach(function(day) {
+          day.exercises.forEach(function(ex) { canonicalById[ex.id] = ex; });
+        });
+        const allCustomDays = [...parsed.customPlan.cycleA, ...parsed.customPlan.cycleB];
+        allCustomDays.forEach(function(day) {
+          day.exercises.forEach(function(ex) {
+            const canonical = canonicalById[ex.id];
+            if (canonical) {
+              if (canonical.isBodyweightOnly) ex.isBodyweightOnly = true;
+              if (canonical.unilateral) ex.unilateral = true;
+              if (canonical.noTracking) ex.noTracking = true;
+            }
+          });
+        });
+      }
+      parsed.stateVersion = 1.2;
+    }
+    return parsed;
+  }
 
   function loadState() {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
-        const parsed = JSON.parse(saved);
+        let parsed = JSON.parse(saved);
+        parsed = migrateState(parsed);
         state = { ...state, ...parsed };
       }
     } catch (e) { console.warn('Load failed:', e); }
   }
 
+  // Non-blocking async save with requestIdleCallback
   function saveState() {
+    const toSave = {
+      stateVersion: STATE_VERSION,
+      znsBaseline: state.znsBaseline,
+      athlete: state.athlete,
+      sessions: state.sessions,
+      customPlan: state.customPlan,
+      lastBackup: state.lastBackup,
+      activeSession: state.activeSession,
+      workoutStartTime: state.workoutStartTime
+    };
+    const doSave = () => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+      } catch (e) {
+        if (e.name === 'QuotaExceededError') {
+          toast('⚠️ Speicher voll! Bitte Backup erstellen und alte Daten löschen.');
+        } else {
+          console.warn('Save failed:', e);
+        }
+      }
+    };
+    if (typeof requestIdleCallback !== 'undefined') {
+      requestIdleCallback(doSave, { timeout: 1000 });
+    } else {
+      setTimeout(doSave, 0);
+    }
+  }
+
+  // Debounced save for input events (500ms)
+  function debouncedSave() {
+    if (_saveDebounceTimer) clearTimeout(_saveDebounceTimer);
+    _saveDebounceTimer = setTimeout(() => {
+      _saveDebounceTimer = null;
+      saveState();
+    }, 500);
+  }
+
+  // Synchronous flush (used on visibilitychange to background)
+  function flushSave() {
+    if (_saveDebounceTimer) {
+      clearTimeout(_saveDebounceTimer);
+      _saveDebounceTimer = null;
+    }
     try {
       const toSave = {
+        stateVersion: STATE_VERSION,
         znsBaseline: state.znsBaseline,
         athlete: state.athlete,
         sessions: state.sessions,
         customPlan: state.customPlan,
-        lastBackup: state.lastBackup
+        lastBackup: state.lastBackup,
+        activeSession: state.activeSession,
+        workoutStartTime: state.workoutStartTime
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
-    } catch (e) { console.warn('Save failed:', e); }
+    } catch (e) { console.warn('Flush save failed:', e); }
+  }
+
+  // --- Wake Lock ---
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      _wakeLock = await navigator.wakeLock.request('screen');
+    } catch (e) { /* silently fail */ }
+  }
+
+  function releaseWakeLock() {
+    if (_wakeLock) { _wakeLock.release(); _wakeLock = null; }
   }
 
   // --- Helpers ---
@@ -51,11 +157,13 @@
   function show(el) { el.classList.remove('hidden'); }
   function hide(el) { el.classList.add('hidden'); }
 
-  function toast(msg) {
+  function toast(msg, onClick) {
     const t = $('toast');
     $('toastMsg').textContent = msg;
+    t.style.cursor = onClick ? 'pointer' : '';
+    t.onclick = onClick || null;
     show(t);
-    setTimeout(() => hide(t), 2500);
+    if (!onClick) setTimeout(() => hide(t), 2500);
   }
 
   function formatDate(d) {
@@ -399,6 +507,9 @@
 
     switchView('viewWorkout');
     hide($('bottomNav'));
+    // Push history state for hardware back button support
+    window.history.pushState({ modal: 'workout' }, '');
+    requestWakeLock();
     saveState(); // Save fresh session as draft
   }
 
@@ -427,6 +538,8 @@
 
     switchView('viewWorkout');
     hide($('bottomNav'));
+    window.history.pushState({ modal: 'workout' }, '');
+    requestWakeLock();
   }
 
   function renderWarmup(type) {
@@ -455,7 +568,7 @@
 
   function renderExercises(day) {
     const list = $('exerciseList');
-    list.innerHTML = day.exercises.map((ex, i) => {
+    const htmlParts = day.exercises.map((ex, i) => {
       const sessionEx = state.activeSession.exercises[i];
       const isNoTrack = !!ex.noTracking;
       const isUni = !!ex.unilateral;
@@ -535,49 +648,111 @@
           <input type="text" class="input-field input-setup" placeholder="z.B. Sitz 4, Winkel 30°, Pin 3..." value="${sessionEx.setup || ''}" onchange="window.app.updateExSetup(${i}, this.value)">
         </div>
 
-        ${Array.from({ length: numSets }, (_, si) => {
-        const prefillW = sessionEx.sets[si].weight || '';
-        const armLabel = isUni ? (si < ex.sets ? `L${si + 1}` : `R${si - ex.sets + 1}`) : `S${si + 1}`;
-        return `
-          <div class="set-row">
-            <div class="set-label">${armLabel}</div>
-            <div class="set-inputs">
-              <div class="set-input-group">
-                <label>KG</label>
-                <div class="weight-prefill-wrap">
-                  <input type="number" class="input-field input-sm" id="w_${i}_${si}" inputmode="decimal"
-                    value="${prefillW}"
-                    onchange="window.app.updateSet(${i}, ${si}, 'weight', this.value)">
+        ${(() => {
+          const isBW = !!ex.isBodyweightOnly;
+          if (isUni) {
+            // Unilateral: render pairs (L + R) side by side for each set number
+            return Array.from({ length: ex.sets }, (_, pairIdx) => {
+              const lSi = pairIdx;
+              const rSi = pairIdx + ex.sets;
+              const lSet = sessionEx.sets[lSi] || {};
+              const rSet = sessionEx.sets[rSi] || {};
+              const lPrefill = lSet.weight || '';
+              const rPrefill = rSet.weight || '';
+
+              const renderInputGroup = (label, siIdx, side) => `
+                <div class="uni-side">
+                  <div class="uni-side-label">${side}</div>
+                  ${!isBW ? `<div class="set-input-group">
+                    <label aria-label="Gewicht ${side === 'L' ? 'links' : 'rechts'}">KG</label>
+                    <input type="number" class="input-field input-sm" id="w_${i}_${siIdx}" inputmode="decimal"
+                      value="${side === 'L' ? lPrefill : rPrefill}"
+                      onchange="window.app.updateSet(${i}, ${siIdx}, 'weight', this.value)">
+                  </div>` : ''}
+                  <div class="set-input-group">
+                    <label>REPS</label>
+                    <input type="number" class="input-field input-sm" id="r_${i}_${siIdx}" inputmode="numeric"
+                      value="${side === 'L' ? (lSet.reps || '') : (rSet.reps || '')}"
+                      onchange="window.app.updateSet(${i}, ${siIdx}, 'reps', this.value)">
+                  </div>
+                  ${!isBW ? `<div class="set-input-group">
+                    <label>RIR</label>
+                    <input type="number" class="input-field input-sm" id="rir_${i}_${siIdx}" inputmode="numeric" min="0" max="5"
+                      value="${side === 'L' ? (lSet.rir || '') : (rSet.rir || '')}"
+                      onchange="window.app.updateSet(${i}, ${siIdx}, 'rir', this.value)">
+                  </div>` : ''}
                 </div>
-              </div>
-              <div class="set-input-group">
-                <label>REPS</label>
-                <input type="number" class="input-field input-sm" id="r_${i}_${si}" inputmode="numeric"
-                  onchange="window.app.updateSet(${i}, ${si}, 'reps', this.value)">
-              </div>
-              <div class="set-input-group">
-                <label>RIR</label>
-                <input type="number" class="input-field input-sm" id="rir_${i}_${si}" inputmode="numeric" min="0" max="5"
-                  onchange="window.app.updateSet(${i}, ${si}, 'rir', this.value)">
-              </div>
-              <div class="set-input-group feedback-group">
-                <label>NEXT</label>
-                <div class="feedback-btns">
-                  <button class="fb-btn fb-up" id="fb_up_${i}_${si}" onclick="window.app.setFeedback(${i}, ${si}, 'up')" title="Nächstes Mal erhöhen">▲</button>
-                  <button class="fb-btn fb-down" id="fb_dn_${i}_${si}" onclick="window.app.setFeedback(${i}, ${si}, 'down')" title="Nächstes Mal senken">▼</button>
+              `;
+
+              return `
+                <div class="set-row set-row-uni">
+                  <div class="set-label">S${pairIdx + 1}</div>
+                  <div class="uni-pair">
+                    ${renderInputGroup('L', lSi, 'L')}
+                    <div class="uni-divider"></div>
+                    ${renderInputGroup('R', rSi, 'R')}
+                  </div>
+                  <div class="set-check-col">
+                    <button class="set-check" id="chk_${i}_${lSi}" onclick="window.app.toggleSetDone(${i}, ${lSi})">✓</button>
+                  </div>
                 </div>
-              </div>
-            </div>
-            <button class="set-check" id="chk_${i}_${si}" onclick="window.app.toggleSetDone(${i}, ${si})">✓</button>
-          </div>
-        `}).join('')}
+              `;
+            }).join('');
+          } else {
+            return Array.from({ length: numSets }, (_, si) => {
+              const prefillW = sessionEx.sets[si].weight || '';
+              return `
+                <div class="set-row">
+                  <div class="set-label">S${si + 1}</div>
+                  <div class="set-inputs">
+                    ${!isBW ? `<div class="set-input-group">
+                      <label>KG</label>
+                      <div class="weight-prefill-wrap">
+                        <input type="number" class="input-field input-sm" id="w_${i}_${si}" inputmode="decimal"
+                          value="${prefillW}"
+                          onchange="window.app.updateSet(${i}, ${si}, 'weight', this.value)">
+                      </div>
+                    </div>` : ''}
+                    <div class="set-input-group">
+                      <label>REPS</label>
+                      <input type="number" class="input-field input-sm" id="r_${i}_${si}" inputmode="numeric"
+                        value="${sessionEx.sets[si].reps || ''}"
+                        onchange="window.app.updateSet(${i}, ${si}, 'reps', this.value)">
+                    </div>
+                    ${!isBW ? `<div class="set-input-group">
+                      <label>RIR</label>
+                      <input type="number" class="input-field input-sm" id="rir_${i}_${si}" inputmode="numeric" min="0" max="5"
+                        value="${sessionEx.sets[si].rir || ''}"
+                        onchange="window.app.updateSet(${i}, ${si}, 'rir', this.value)">
+                    </div>` : ''}
+                    <div class="set-input-group feedback-group">
+                      <label>NEXT</label>
+                      <div class="feedback-btns">
+                        <button class="fb-btn fb-up" id="fb_up_${i}_${si}" onclick="window.app.setFeedback(${i}, ${si}, 'up')" title="Nächstes Mal erhöhen">▲</button>
+                        <button class="fb-btn fb-down" id="fb_dn_${i}_${si}" onclick="window.app.setFeedback(${i}, ${si}, 'down')" title="Nächstes Mal senken">▼</button>
+                      </div>
+                    </div>
+                  </div>
+                  <button class="set-check" id="chk_${i}_${si}" onclick="window.app.toggleSetDone(${i}, ${si})">✓</button>
+                </div>
+              `;
+            }).join('');
+          }
+        })()}
         <div class="set-notes">
           <input type="text" class="input-field" placeholder="Notizen..." id="notes_${i}"
             onchange="window.app.updateExNotes(${i}, this.value)">
         </div>
       </div>
     </div>
-  `}).join('');
+  `});
+    // Use DocumentFragment to prevent multiple reflows
+    const frag = document.createDocumentFragment();
+    const tmp = document.createElement('div');
+    tmp.innerHTML = htmlParts.join('');
+    while (tmp.firstChild) frag.appendChild(tmp.firstChild);
+    list.innerHTML = '';
+    list.appendChild(frag);
   }
 
   function toggleExercise(idx) {
@@ -600,7 +775,7 @@
   function updateSet(exIdx, setIdx, field, value) {
     if (state.activeSession) {
       state.activeSession.exercises[exIdx].sets[setIdx][field] = value;
-      saveState(); // draft auto-save
+      debouncedSave();
 
       // Update RIR Color class
       if (field === 'rir') {
@@ -669,14 +844,14 @@
   function updateExNotes(exIdx, value) {
     if (state.activeSession) {
       state.activeSession.exercises[exIdx].notes = value;
-      saveState();
+      debouncedSave();
     }
   }
 
   function updateExSetup(exIdx, value) {
     if (state.activeSession) {
       state.activeSession.exercises[exIdx].setup = value;
-      saveState();
+      debouncedSave();
     }
   }
 
@@ -689,6 +864,8 @@
 
     // Auto-Rest Timer & Confetti
     if (set.done) {
+      // Haptic feedback on set complete
+      if (navigator.vibrate) navigator.vibrate(50);
       startRestTimer(90);
 
       const el = $(`stats_${exIdx}`);
@@ -729,6 +906,7 @@
     if (!state.activeSession) return;
     if (state.timerInterval) clearInterval(state.timerInterval);
     closeRestTimer();
+    releaseWakeLock();
 
     // Save to history
     const elapsed = Math.floor((Date.now() - state.workoutStartTime) / 60000);
@@ -748,7 +926,8 @@
   function backFromWorkout() {
     // Just pause timer but keep the session alive as a draft
     if (state.timerInterval) clearInterval(state.timerInterval);
-    saveState(); // Ensure the draft is synced to localStorage
+    releaseWakeLock();
+    flushSave(); // Ensure the draft is synced to localStorage
 
     show($('bottomNav'));
     switchView('viewDashboard');
@@ -773,6 +952,40 @@
     }, 1000);
   }
 
+  // --- Rest Timer (thread-safe, Date.now() based) ---
+  let _restTimerEnd = null;
+  let _restTimerRAF = null;
+
+  function startRestTimer(seconds) {
+    const card = document.getElementById('floatingRestTimer');
+    if (!card) return;
+    _restTimerEnd = Date.now() + seconds * 1000;
+    card.classList.remove('hidden');
+
+    function tick() {
+      const remaining = Math.max(0, Math.ceil((_restTimerEnd - Date.now()) / 1000));
+      const display = document.getElementById('restTimerDisplay');
+      const bar = document.getElementById('restTimerBar');
+      if (display) display.textContent = formatTime(remaining);
+      if (bar) bar.style.width = ((remaining / seconds) * 100) + '%';
+      if (remaining <= 0) {
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        _restTimerRAF = null;
+        return;
+      }
+      _restTimerRAF = requestAnimationFrame(tick);
+    }
+    if (_restTimerRAF) cancelAnimationFrame(_restTimerRAF);
+    _restTimerRAF = requestAnimationFrame(tick);
+  }
+
+  function closeRestTimer() {
+    if (_restTimerRAF) { cancelAnimationFrame(_restTimerRAF); _restTimerRAF = null; }
+    _restTimerEnd = null;
+    const card = document.getElementById('floatingRestTimer');
+    if (card) card.classList.add('hidden');
+  }
+
   // --- Exercise Info Modal ---
   function showExInfo(exId) {
     const allExercises = [...getPlan().cycleA, ...getPlan().cycleB].flatMap(d => d.exercises);
@@ -781,6 +994,7 @@
 
     $('infoModalTitle').textContent = ex.name;
     $('infoModalBody').innerHTML = `
+    <div class="skeleton-pulse skeleton-img" title="Übungsgrafik (demnächst verfügbar)"></div>
     <p><strong>Sets × Reps:</strong> ${ex.sets}x ${ex.reps}${ex.tempo ? ` | Tempo: ${ex.tempo}` : ''}</p>
     ${ex.note ? `<div class="tip-box">📌 ${ex.note}</div>` : ''}
     <h4>Korrekte Ausführung</h4>
@@ -788,6 +1002,7 @@
     ${ex.id.includes('b5e2') || ex.id.includes('b7e3') ? `<div class="warning-box">⚠️ ACL/Kapsel-Schutz: ROM zwingend 2-3cm vor der Endgradigkeit limitieren!</div>` : ''}
   `;
     show($('infoModal'));
+    window.history.pushState({ modal: 'info' }, '');
   }
 
   // --- History ---
@@ -979,6 +1194,7 @@
       $('infoModalTitle').textContent = name + ' – Fortschritt';
       $('infoModalBody').innerHTML = '<p class="empty-state">Noch keine Daten aufgezeichnet.</p>';
       show($('infoModal'));
+      window.history.pushState({ modal: 'info' }, '');
       return;
     }
 
@@ -1011,6 +1227,7 @@
             ${history.map(h => `<p style="font-size:0.82rem;">${formatDate(h.date)}: <strong>${h.maxWeight} kg</strong> (Vol: ${h.volume})</p>`).join('')}
         `;
     show($('infoModal'));
+    window.history.pushState({ modal: 'info' }, '');
   }
 
   function showSessionDetail(id) {
@@ -1045,6 +1262,7 @@
     </div>
   `;
     show($('modalOverlay'));
+    window.history.pushState({ modal: 'overlay' }, '');
   }
 
   function deleteSession(id) {
@@ -1155,6 +1373,7 @@
     </div>
   `;
     show($('modalOverlay'));
+    window.history.pushState({ modal: 'overlay' }, '');
   }
 
   function addExercisePrompt(dayIdx) {
@@ -1272,10 +1491,45 @@
     if (btnCloseRestTimer) btnCloseRestTimer.addEventListener('click', closeRestTimer);
 
     // Modals
-    $('btnCloseInfo').addEventListener('click', () => hide($('infoModal')));
-    $('btnCloseEdit').addEventListener('click', () => hide($('editModal')));
+    $('btnCloseInfo').addEventListener('click', () => { hide($('infoModal')); });
+    $('btnCloseEdit').addEventListener('click', () => { hide($('editModal')); });
     $('infoModal').addEventListener('click', (e) => { if (e.target === $('infoModal')) hide($('infoModal')); });
     $('modalOverlay').addEventListener('click', (e) => { if (e.target === $('modalOverlay')) hide($('modalOverlay')); });
+
+    // Hardware back button (popstate) — closes modals or exits workout view
+    window.addEventListener('popstate', (e) => {
+      if (!$('infoModal').classList.contains('hidden')) { hide($('infoModal')); return; }
+      if (!$('modalOverlay').classList.contains('hidden')) { hide($('modalOverlay')); return; }
+      if (state.currentView === 'viewWorkout') { backFromWorkout(); return; }
+    });
+
+    // Escape key support
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if (!$('infoModal').classList.contains('hidden')) { hide($('infoModal')); window.history.back(); return; }
+        if (!$('modalOverlay').classList.contains('hidden')) { hide($('modalOverlay')); window.history.back(); return; }
+      }
+    });
+
+    // visibilitychange: flush pending saves, re-acquire wake lock
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        flushSave();
+      } else if (document.visibilityState === 'visible' && state.activeSession) {
+        requestWakeLock();
+      }
+    });
+
+    // Global error boundary
+    window.addEventListener('error', (e) => {
+      console.error('Uncaught error:', e.error);
+      flushSave();
+      toast('⚠️ Fehler aufgetreten. Daten wurden gesichert.');
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      console.error('Unhandled rejection:', e.reason);
+      flushSave();
+    });
   }
 
   // --- Public API ---
@@ -1335,11 +1589,40 @@
     }, 1400);
 
     bindEvents();
+
+    // Restore active workout if it existed (page was refreshed mid-workout)
+    if (state.activeSession) {
+      const days = getDays(state.activeSession.cycle);
+      const day = days[state.activeSession.dayIndex];
+      if (day) {
+        renderDashboard();
+        // Let the user resume via the draft check flow when they tap the day
+      }
+    }
+
     renderDashboard();
 
-    // Service Worker
+    // Service Worker with graceful update detection
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(() => { });
+      navigator.serviceWorker.register('./sw.js').then(reg => {
+        reg.addEventListener('updatefound', () => {
+          const newWorker = reg.installing;
+          newWorker.addEventListener('statechange', () => {
+            if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+              toast('🔄 Update verfügbar. Tippen zum Aktualisieren.', () => {
+                newWorker.postMessage({ type: 'SKIP_WAITING' });
+                hide($('toast'));
+                location.reload();
+              });
+            }
+          });
+        });
+      }).catch(() => { });
+
+      // Re-acquire wake lock after SW controller change
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (state.activeSession) requestWakeLock();
+      });
     }
   }
 

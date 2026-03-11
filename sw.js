@@ -1,8 +1,9 @@
-const CACHE_NAME = 'ppl8-tracker-v2';
+const CACHE_NAME = 'ppl8-tracker-v4';
 const ASSETS = [
     './index.html',
     './style.css',
     './app.js',
+    './data.js',
     './manifest.json'
 ];
 
@@ -24,4 +25,11 @@ self.addEventListener('fetch', e => {
     e.respondWith(
         caches.match(e.request).then(cached => cached || fetch(e.request))
     );
+});
+
+// Graceful update: allow reload trigger from app
+self.addEventListener('message', e => {
+    if (e.data && e.data.type === 'SKIP_WAITING') {
+        self.skipWaiting();
+    }
 });

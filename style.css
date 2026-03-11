@@ -1989,3 +1989,154 @@ input {
     opacity: 1;
     box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
   }
+/* ========================================
+   PPL-8 v1.1 UPGRADES
+   ======================================== */
+
+/* --- Neumorphic Modal Backdrop Filter --- */
+.modal-overlay .modal {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow:
+    0 32px 64px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+}
+
+/* --- Toast upgrade: pointer cursor for update toast --- */
+.toast {
+  cursor: default;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.toast[style*="pointer"] {
+  box-shadow: 0 0 0 2px var(--accent-blue);
+}
+
+/* --- Unilateral Side-by-Side UX --- */
+.set-row-uni {
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 8px;
+  border: 1px solid rgba(6, 182, 212, 0.15);
+  border-radius: var(--radius-md);
+  background: rgba(6, 182, 212, 0.03);
+}
+
+.set-row-uni .set-label {
+  font-size: 0.72rem;
+  color: var(--accent-cyan);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  align-self: flex-start;
+}
+
+.uni-pair {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  width: 100%;
+}
+
+.uni-side {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.uni-side-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+}
+.uni-side:first-child .uni-side-label { color: var(--accent-blue); }
+.uni-side:last-child .uni-side-label { color: var(--accent-green); }
+
+.uni-side .set-input-group {
+  min-width: 0;
+}
+.uni-side .input-sm {
+  width: 100%;
+}
+
+.uni-divider {
+  width: 1px;
+  background: rgba(148, 163, 184, 0.15);
+  align-self: stretch;
+  margin: 0 4px;
+  border-radius: 1px;
+}
+
+.set-check-col {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* --- Skeleton Loading for Info Modal --- */
+.skeleton-pulse {
+  background: linear-gradient(
+    90deg,
+    rgba(30, 41, 59, 0.8) 25%,
+    rgba(51, 65, 85, 0.9) 50%,
+    rgba(30, 41, 59, 0.8) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeletonPulse 1.5s infinite;
+  border-radius: var(--radius-sm);
+}
+
+@keyframes skeletonPulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.skeleton-img {
+  width: 100%;
+  height: 160px;
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
+}
+
+/* --- Touch Target Enforcement (Apple HIG: min 44x44px) --- */
+.set-check,
+.btn-info,
+.btn-back,
+.btn-close,
+.nav-item,
+.fb-btn,
+.btn-expand,
+.cycle-tab {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.fb-btn {
+  min-height: 44px;
+  min-width: 36px;
+}
+
+/* --- Neumorphic Card shadows (soft dark) --- */
+.card {
+  box-shadow:
+    4px 4px 12px rgba(0, 0, 0, 0.4),
+    -2px -2px 8px rgba(255, 255, 255, 0.02),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.exercise-card {
+  box-shadow:
+    2px 4px 10px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* --- Input decimal mode visual cue --- */
+.input-sm[inputmode="decimal"],
+.input-sm[inputmode="numeric"] {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}

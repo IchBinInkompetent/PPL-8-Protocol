@@ -1929,6 +1929,18 @@ input {
   vertical-align: middle;
 }
 
+.feedback-adj-tag {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 4px;
+  display: inline-block;
+  vertical-align: middle;
+}
+
 @keyframes pulse-glow {
   0% {
     box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);

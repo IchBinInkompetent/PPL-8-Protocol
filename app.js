@@ -5,6 +5,9 @@
 (function () {
   'use strict';
 
+  // --- Constants ---
+  const DEFAULT_REST_SECONDS = 90;
+
   // --- State ---
   const STATE_VERSION = 1.1;
   let state = {
@@ -250,6 +253,7 @@
       state.lastBackup = new Date().toISOString();
       saveState();
       renderDashboard();
+      populateSettingsForm();
       gistSetSyncStatus('ok', 'Synchronisiert ' + new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }));
       toast('☁️ Daten synchronisiert! ' + mergedSessions.length + ' Sessions geladen.');
     } catch (e) {
@@ -342,6 +346,24 @@
     return '';
   }
 
+  // Weight step used when applying feedback signals
+  const FEEDBACK_STEP_KG = 2.5;
+
+  // Returns prefill weights adjusted by the feedback stored on the last session's sets.
+  // feedback 'up'   → weight + FEEDBACK_STEP_KG
+  // feedback 'down' → weight − FEEDBACK_STEP_KG (floor at 0)
+  // feedback ''     → weight unchanged
+  function getSuggestedWeights(exId) {
+    const lastSets = getLastWeights(exId);
+    if (!lastSets) return null;
+    return lastSets.map(s => {
+      const base = parseFloat(s.weight) || 0;
+      if (s.feedback === 'up')   return { ...s, weight: String(base + FEEDBACK_STEP_KG), _adjusted: 'up' };
+      if (s.feedback === 'down') return { ...s, weight: String(Math.max(0, base - FEEDBACK_STEP_KG)), _adjusted: 'down' };
+      return { ...s, _adjusted: '' };
+    });
+  }
+
   function getExerciseHistory(exId) {
     return state.sessions
       .filter(s => s.exercises.some(e => e.id === exId))
@@ -403,8 +425,11 @@
     renderRecentSessions();
     renderHeatmap();
     updateZnsDisplay();
+  }
 
-    // Load settings
+  // Populates the Settings view fields from current state.
+  // Called once on init() and after saveBaseline() — never from renderDashboard().
+  function populateSettingsForm() {
     $('settingHeight').value = state.athlete.height;
     $('settingWeight').value = state.athlete.weight;
     $('settingBF').value = state.athlete.bodyFat;
@@ -635,15 +660,17 @@
           return { id: ex.id, name: ex.name, noTracking: true, done: false, notes: '' };
         }
         const numSets = ex.unilateral ? ex.sets * 2 : ex.sets;
-        const lastWeights = getLastWeights(ex.id);
+        const suggestedWeights = getSuggestedWeights(ex.id);
         const lastSetup = getLastSetup(ex.id);
+        const hasAdjustment = suggestedWeights && suggestedWeights.some(s => s._adjusted !== '');
         return {
           id: ex.id,
           name: ex.name,
           unilateral: !!ex.unilateral,
           setup: lastSetup,
+          feedbackAdjusted: !!hasAdjustment,
           sets: Array.from({ length: numSets }, (_, si) => {
-            const prevW = lastWeights && lastWeights[si] ? lastWeights[si].weight : '';
+            const prevW = suggestedWeights && suggestedWeights[si] ? suggestedWeights[si].weight : '';
             return { weight: prevW, reps: '', rir: '', notes: '', done: false, feedback: '' };
           })
         };
@@ -760,6 +787,7 @@
         </div>
         <div class="set-notes" style="margin-top:8px">
           <input type="text" class="input-field" placeholder="Notizen..." id="notes_${i}"
+            value="${sessionEx.notes || ''}"
             onchange="window.app.updateExNotes(${i}, this.value)">
         </div>
       </div>
@@ -796,6 +824,7 @@
           <div class="exercise-meta">
             ${ex.sets}x ${ex.reps} ${ex.tempo ? `<span class="tempo-tag">${ex.tempo}</span>` : ''}
             ${recommendOverload ? `<span class="overload-tag" title="Gewicht erhöhen!">🔥 Overload</span>` : ''}
+            ${sessionEx.feedbackAdjusted ? `<span class="feedback-adj-tag" title="Vorschlag aus letztem Feedback">⚖️ Feedback</span>` : ''}
             <span id="stats_${i}" class="exercise-live-stats" style="color:var(--accent-green);font-size:0.7rem;margin-left:6px;font-weight:700;"></span>
           </div>
         </div>
@@ -905,6 +934,7 @@
         })()}
         <div class="set-notes">
           <input type="text" class="input-field" placeholder="Notizen..." id="notes_${i}"
+            value="${sessionEx.notes || ''}"
             onchange="window.app.updateExNotes(${i}, this.value)">
         </div>
       </div>
@@ -1036,7 +1066,11 @@
     if (set.done) {
       // Haptic feedback on set complete
       if (navigator.vibrate) navigator.vibrate(50);
-      startRestTimer(90);
+      const planEx = [...getPlan().cycleA, ...getPlan().cycleB]
+        .flatMap(d => d.exercises)
+        .find(e => e.id === state.activeSession.exercises[exIdx].id);
+      const restSeconds = (planEx && planEx.restSeconds) || DEFAULT_REST_SECONDS;
+      startRestTimer(restSeconds);
 
       const el = $(`stats_${exIdx}`);
       if (el && el.dataset.pr === 'true') {
@@ -1173,7 +1207,7 @@
     ${ex.note ? `<div class="tip-box">📌 ${ex.note}</div>` : ''}
     <h4>Korrekte Ausführung</h4>
     <p>${ex.guide}</p>
-    ${ex.id.includes('b5e2') || ex.id.includes('b7e3') ? `<div class="warning-box">⚠️ ACL/Kapsel-Schutz: ROM zwingend 2-3cm vor der Endgradigkeit limitieren!</div>` : ''}
+    ${ex.acl_warning ? `<div class="warning-box">⚠️ ACL/Kapsel-Schutz: ROM zwingend 2-3cm vor der Endgradigkeit limitieren!</div>` : ''}
   `;
     show($('infoModal'));
     window.history.pushState({ modal: 'info' }, '');
@@ -1503,6 +1537,7 @@
           state.customPlan = data.state.customPlan || state.customPlan;
           saveState();
           renderDashboard();
+          populateSettingsForm();
           toast('Daten importiert! ✅');
         } else {
           toast('Ungültiges Backup-Format');
@@ -1643,6 +1678,7 @@
     state.athlete.bodyFat = parseInt($('settingBF').value) || 13;
     saveState();
     updateZnsDisplay();
+    populateSettingsForm();
     toast('Gespeichert ✅');
   }
 
@@ -1881,6 +1917,7 @@
     }, 1400);
 
     bindEvents();
+    populateSettingsForm();
 
     // Restore active workout if it existed (page was refreshed mid-workout)
     if (state.activeSession) {

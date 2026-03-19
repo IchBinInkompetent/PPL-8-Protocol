@@ -8,12 +8,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f172a">
+  <meta name="description" content="PPL-8 Training Tracker - Biomechanical Protocol based Workout Logger">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.github.com; img-src 'self' data:;">
   <title>PPL-8 Training Tracker</title>
   <link rel="manifest" href="manifest.json">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap"
-    rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700;800;900&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 
@@ -39,7 +40,7 @@
         <p class="header-sub" id="headerSub">PPL-8 Protocol</p>
       </div>
       <div class="header-right">
-        <button class="header-btn" id="btnBackup" title="Cloud Backup">
+        <button class="header-btn" id="btnBackup" title="Cloud Backup" aria-label="Cloud Backup">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
           </svg>
@@ -52,35 +53,15 @@
 
       <!-- ===== DASHBOARD VIEW ===== -->
       <section class="view active" id="viewDashboard">
-        <!-- ZNS Readiness Card -->
-        <div class="card card-zns" id="znsCard">
-          <div class="card-header">
-            <span class="card-icon">🧠</span>
-            <h3>ZNS-Readiness</h3>
-            <span class="zns-badge" id="znsBadge">--</span>
-          </div>
-          <div class="zns-body">
-            <div class="zns-input-group">
-              <label>Griffkraft heute (kg)</label>
-              <input type="number" id="znsInput" class="input-field" placeholder="z.B. 55">
-              <button class="btn btn-sm btn-primary" id="btnZnsCheck">Prüfen</button>
-            </div>
-            <div class="zns-result hidden" id="znsResult">
-              <p id="znsResultText"></p>
-            </div>
-            <div class="zns-baseline">
-              <small>Baseline: <span id="znsBaselineDisplay">--</span> kg</small>
-              <button class="btn-link" id="btnSetBaseline">Baseline setzen</button>
-            </div>
-          </div>
-        </div>
-
+        <!-- ZNS Readiness Warning -->
+        <div id="znsWarningContainer"></div>
+        
         <!-- System Notes -->
         <div class="card card-system">
           <div class="card-header">
             <span class="card-icon">⚡</span>
             <h3>System-Parameter</h3>
-            <button class="btn-expand" id="btnSystemToggle">
+            <button class="btn-expand" id="btnSystemToggle" aria-label="System-Parameter umschalten">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="6 9 12 15 18 9" />
               </svg>
@@ -157,12 +138,25 @@
             <p class="empty-state">Noch keine Trainings aufgezeichnet.</p>
           </div>
         </div>
+
+        <!-- Muscle Group Heatmap -->
+        <div class="card card-muscle-heatmap">
+          <div class="card-header">
+            <span class="card-icon">🦾</span>
+            <h3>Muskelgruppen-Auslastung</h3>
+          </div>
+          <div class="muscle-heatmap-container" id="muscleHeatmapContainer">
+            <p class="empty-state">Noch keine Trainingsdaten.</p>
+          </div>
+        </div>
+
+
       </section>
 
       <!-- ===== WORKOUT VIEW ===== -->
       <section class="view" id="viewWorkout">
         <div class="workout-header" id="workoutHeader">
-          <button class="btn-back" id="btnBackFromWorkout">
+          <button class="btn-back" id="btnBackFromWorkout" aria-label="Zurück zum Dashboard">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M19 12H5M12 19l-7-7 7-7" />
             </svg>
@@ -182,7 +176,7 @@
             <span class="card-icon">🔥</span>
             <h3>Pre-Activation</h3>
             <span class="warmup-tag">5-8 Min</span>
-            <button class="btn-expand" id="btnWarmupExpand">
+            <button class="btn-expand" id="btnWarmupExpand" aria-label="Warmup umschalten">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="6 9 12 15 18 9" />
               </svg>
@@ -230,6 +224,11 @@
             <!-- Filled by JS -->
           </div>
         </div>
+        <div class="history-tabs">
+          <button class="hist-tab active" data-tab="sessions">Sessions</button>
+          <button class="hist-tab" data-tab="charts">Charts</button>
+          <button class="hist-tab" data-tab="prs">PRs</button>
+        </div>
         <div class="history-list" id="historyList">
           <p class="empty-state">Noch keine Trainings aufgezeichnet.</p>
         </div>
@@ -243,28 +242,18 @@
           <h3>👤 Athlet</h3>
           <div class="settings-group">
             <div class="setting-row">
-              <label>Körpergröße (cm)</label>
+              <label for="settingHeight">Körpergröße (cm)</label>
               <input type="number" id="settingHeight" class="input-field" value="200">
             </div>
             <div class="setting-row">
-              <label>Körpergewicht (kg)</label>
+              <label for="settingWeight">Körpergewicht (kg)</label>
               <input type="number" id="settingWeight" class="input-field" value="94">
             </div>
             <div class="setting-row">
-              <label>Körperfettanteil (%)</label>
+              <label for="settingBF">Körperfettanteil (%)</label>
               <input type="number" id="settingBF" class="input-field" value="13">
             </div>
-          </div>
-        </div>
-
-        <div class="card settings-card">
-          <h3>🧠 ZNS-Baseline</h3>
-          <div class="settings-group">
-            <div class="setting-row">
-              <label>Griffkraft Baseline (kg)</label>
-              <input type="number" id="settingBaseline" class="input-field" placeholder="z.B. 55">
-            </div>
-            <button class="btn btn-primary" id="btnSaveBaseline">Speichern</button>
+            <button class="btn btn-primary" id="btnSaveBaseline" style="margin-top:12px;">Speichern</button>
           </div>
         </div>
 
@@ -277,30 +266,31 @@
             <div class="sync-status-bar" id="syncStatus" data-status="idle">☁️ Nicht konfiguriert</div>
 
             <div class="setting-row" style="margin-top:12px;">
-              <label class="setting-label">GitHub Personal Access Token</label>
-              <input type="text" id="gistTokenInput" class="input-field" placeholder="ghp_xxxx… oder github_pat_xxxx…" autocomplete="off" spellcheck="false" autocorrect="off" autocapitalize="off">
+              <label for="gistTokenInput" class="setting-label">GitHub Personal Access Token</label>
+              <input type="password" id="gistTokenInput" class="input-field" placeholder="ghp_xxxx… oder github_pat_xxxx…" autocomplete="off" spellcheck="false" autocorrect="off" autocapitalize="off">
             </div>
             <p class="setting-desc" style="font-size:0.72rem;margin-top:4px;">
               Token erstellen: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained → nur <strong>Gists: Read & Write</strong>
             </p>
 
             <div class="gist-id-row" style="margin-top:8px;">
-              <label class="setting-label">Gist-ID (für andere Geräte)</label>
+              <label for="gistIdDisplay" class="setting-label">Gist-ID (für andere Geräte)</label>
               <input type="text" id="gistIdDisplay" class="input-field" placeholder="Wird nach erstem Push angezeigt">
             </div>
 
             <div class="backup-buttons" style="margin-top:12px;">
-              <button class="btn btn-primary" id="btnSaveGist" onclick="window.gistSaveSettings()">Token speichern</button>
-              <button class="btn btn-outline" id="btnGistPush" onclick="window.gistPushData()">
+              <button class="btn btn-primary" id="btnSaveGist">Token speichern</button>
+              <button class="btn btn-outline" id="btnGistPush">
                 ⬆️ Push (Hochladen)
               </button>
-              <button class="btn btn-outline" id="btnGistPull" onclick="window.gistPullData()">
+              <button class="btn btn-outline" id="btnGistPull">
                 ⬇️ Pull (Herunterladen)
               </button>
-              <button class="btn btn-outline" id="btnGistDiag" onclick="window.gistDiagnose()" style="font-size:0.8rem;opacity:0.7;">
+              <button class="btn btn-outline" id="btnGistDiag" style="font-size:0.8rem;opacity:0.7;">
                 🔍 Verbindung testen
               </button>
             </div>
+            <p style="font-size:0.72rem;color:var(--accent-amber);margin-top:8px;padding:6px 8px;background:rgba(247,183,49,0.08);border-radius:6px;">⚠️ Der Token wird im lokalen Gerätespeicher abgelegt. Verwende einen Token mit nur <strong>Gist</strong>-Berechtigung (kein repo, kein user). Teile den Token niemals mit anderen Apps.</p>
           </div>
         </div>
 
@@ -396,18 +386,18 @@
   </div>
 
   <!-- Modal Overlay -->
-  <div class="modal-overlay hidden" id="modalOverlay">
+  <div class="modal-overlay hidden" id="modalOverlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal" id="modalContent">
       <!-- Filled by JS -->
     </div>
   </div>
 
   <!-- Edit Exercise Modal -->
-  <div class="modal-overlay hidden" id="editModal">
+  <div class="modal-overlay hidden" id="editModal" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
     <div class="modal modal-edit">
       <div class="modal-header">
         <h3 id="editModalTitle">Übung bearbeiten</h3>
-        <button class="btn-close" id="btnCloseEdit">&times;</button>
+        <button class="btn-close" id="btnCloseEdit" aria-label="Schließen">&times;</button>
       </div>
       <div class="modal-body" id="editModalBody">
         <!-- Filled by JS -->
@@ -415,12 +405,47 @@
     </div>
   </div>
 
+  <!-- Finish Workout Modal (ZNS & RPE) -->
+  <div class="modal-overlay hidden" id="finishModal" role="dialog" aria-modal="true" aria-labelledby="finishModalTitle">
+    <div class="modal modal-finish">
+      <div class="modal-header">
+        <h3 id="finishModalTitle">Training abschließen</h3>
+        <button class="btn-close" id="btnCloseFinish" aria-label="Schließen">&times;</button>
+      </div>
+      <div class="modal-body" id="finishModalBody">
+        <p style="margin-bottom: 15px; font-size: 0.85rem; color: var(--text-muted);">
+          Bitte bewerte das heutige Training, um die Belastungssteuerung für die kommenden Einheiten zu optimieren.
+        </p>
+        
+        <div class="edit-field" style="margin-bottom: 25px;">
+          <label for="sessionRpeSlider">Session RPE (Anstrengung)</label>
+          <div style="display: flex; align-items: center; gap: 15px;">
+            <input type="range" id="sessionRpeSlider" min="5" max="10" step="0.5" value="8" style="flex: 1; accent-color: var(--accent-blue);">
+            <span id="sessionRpeDisplay" style="font-family: var(--font-display); font-size: 1.2rem; font-weight: 800; color: var(--accent-blue); width: 45px; text-align: right;">8.0</span>
+          </div>
+          <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 6px;">5 = Leichtes Warmup | 8 = Fordernd | 10 = Absolutes Limit</p>
+        </div>
+
+        <div class="edit-field" style="margin-bottom: 30px;">
+          <label for="znsSlider">ZNS-Readiness (Regeneration)</label>
+          <div style="display: flex; align-items: center; gap: 15px;">
+            <input type="range" id="znsSlider" min="1" max="5" step="1" value="3" style="flex: 1; accent-color: var(--accent-green);">
+            <span id="znsDisplay" style="font-family: var(--font-display); font-size: 1.2rem; font-weight: 800; color: var(--accent-green); width: 45px; text-align: right;">3</span>
+          </div>
+          <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 6px;">1 = Komplett zerstört | 3 = Normal erholt | 5 = Extrem frisch</p>
+        </div>
+
+        <button class="btn btn-lg btn-success" id="btnConfirmFinish" style="width: 100%;">💾 Speichern & Beenden</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Exercise Info Modal -->
-  <div class="modal-overlay hidden" id="infoModal">
+  <div class="modal-overlay hidden" id="infoModal" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
     <div class="modal modal-info">
       <div class="modal-header">
         <h3 id="infoModalTitle">Übungsausführung</h3>
-        <button class="btn-close" id="btnCloseInfo">&times;</button>
+        <button class="btn-close" id="btnCloseInfo" aria-label="Schließen">&times;</button>
       </div>
       <div class="modal-body" id="infoModalBody">
         <!-- Filled by JS -->
@@ -433,6 +458,7 @@
     <span id="toastMsg"></span>
   </div>
 
+  <script src="confetti.browser.js"></script>
   <script src="data.js"></script>
   <script src="app.js"></script>
 </body>

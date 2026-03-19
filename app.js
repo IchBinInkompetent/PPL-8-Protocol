@@ -9,12 +9,14 @@
   const DEFAULT_REST_SECONDS = 90;
 
   // --- State ---
-  const STATE_VERSION = 1.1;
+  // Persisted fields are defined in buildSavePayload().
+  // Fields prefixed with _ (e.g. _chartMetric, _nutritionReminderShown) are
+  // transient in-memory flags that are NOT persisted to localStorage.
+  const STATE_VERSION = 11;
   let state = {
     stateVersion: STATE_VERSION,
     currentView: 'viewDashboard',
     currentCycle: 'A',
-    activeDayIndex: null,
     activeSession: null,
     workoutStartTime: null,
     timerInterval: null,
@@ -32,21 +34,23 @@
 
   // Migration pipeline: transforms legacy state to current schema
   function migrateState(parsed) {
-    const version = parsed.stateVersion || 1.0;
-    if (version < 1.1) {
-      // Migrate unilateral exercises: old format stored L+R in flat sets array
-      // New format is the same flat array but we tag it with stateVersion
+    const version = parsed.stateVersion || 10;
+    if (version < 11) {
+      // Migrate unilateral exercises: ensure feedback field exists
       if (parsed.sessions) {
         parsed.sessions.forEach(session => {
           session.exercises && session.exercises.forEach(ex => {
             if (ex.unilateral && ex.sets) {
-              // Ensure each set has a feedback field (may be missing in old data)
               ex.sets = ex.sets.map(s => ({ feedback: '', ...s }));
             }
           });
         });
       }
-      parsed.stateVersion = 1.1;
+      // Migrate znsBaseline: plain number → {value, date} object
+      if (typeof parsed.znsBaseline === 'number') {
+        parsed.znsBaseline = { value: parsed.znsBaseline, date: null };
+      }
+      parsed.stateVersion = 11;
     }
     return parsed;
   }
@@ -58,6 +62,10 @@
         let parsed = JSON.parse(saved);
         parsed = migrateState(parsed);
         state = { ...state, ...parsed };
+        // Ensure znsBaseline is always object or null (guard against bad data)
+        if (state.znsBaseline !== null && typeof state.znsBaseline !== 'object') {
+          state.znsBaseline = null;
+        }
       }
     } catch (e) { console.warn('Load failed:', e); }
   }
@@ -67,6 +75,7 @@
   function buildSavePayload() {
     return {
       stateVersion: STATE_VERSION,
+      currentCycle: state.currentCycle,
       znsBaseline: state.znsBaseline,
       athlete: state.athlete,
       sessions: state.sessions,
@@ -114,6 +123,13 @@
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(buildSavePayload()));
     } catch (e) { console.warn('Flush save failed:', e); }
+  }
+
+  // Modal focus management: move focus into modal for accessibility
+  function focusFirstIn(el) {
+    const sel = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+    const first = el.querySelector(sel);
+    if (first) setTimeout(() => first.focus(), 60);
   }
 
   // --- Gist Cloud Sync ---
@@ -169,7 +185,7 @@
       const res = await fetch(url, {
         method,
         headers: {
-          'Authorization': `${token.startsWith('github_pat_') ? 'token' : 'Bearer'} ${token}`,
+          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
           'X-GitHub-Api-Version': '2022-11-28'
         },
@@ -211,7 +227,7 @@
     try {
       const res = await fetch(`https://api.github.com/gists/${gistId}`, {
         headers: {
-          'Authorization': `${token.startsWith('github_pat_') ? 'token' : 'Bearer'} ${token}`,
+          'Authorization': `Bearer ${token}`,
           'X-GitHub-Api-Version': '2022-11-28'
         }
       });
@@ -232,7 +248,8 @@
       const localTime  = state.lastBackup ? new Date(state.lastBackup).getTime() : 0;
       const remoteTime = remote.syncedAt   ? new Date(remote.syncedAt).getTime()  : 0;
 
-      // Always merge sessions: combine both, deduplicate by session id
+      // Always merge sessions: combine both, deduplicate by session id (local wins)
+      const localIds = new Set((state.sessions || []).map(s => s.id));
       const allSessions = [...(state.sessions || []), ...(remote.sessions || [])];
       const seen = new Set();
       const mergedSessions = allSessions.filter(s => {
@@ -241,6 +258,10 @@
         return true;
       });
       mergedSessions.sort((a, b) => new Date(a.date) - new Date(b.date));
+      const remoteOnlySessions = (remote.sessions || []).filter(s => !localIds.has(s.id));
+      if ((remote.sessions || []).some(s => localIds.has(s.id))) {
+        console.info('Gist-Merge: Lokale Änderungen an vorhandenen Sessions behalten.');
+      }
       state.sessions = mergedSessions;
 
       // For scalar fields: remote wins only if it is newer
@@ -253,6 +274,7 @@
       state.lastBackup = new Date().toISOString();
       saveState();
       renderDashboard();
+      if (state.currentView === 'viewHistory') renderHistory();
       populateSettingsForm();
       gistSetSyncStatus('ok', 'Synchronisiert ' + new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }));
       toast('☁️ Daten synchronisiert! ' + mergedSessions.length + ' Sessions geladen.');
@@ -300,6 +322,16 @@
   function show(el) { el.classList.remove('hidden'); }
   function hide(el) { el.classList.add('hidden'); }
 
+  // XSS-safe HTML escaping for user-controlled strings
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function toast(msg, onClick) {
     const t = $('toast');
     $('toastMsg').textContent = msg;
@@ -346,22 +378,71 @@
     return '';
   }
 
-  // Weight step used when applying feedback signals
+  // Weight step for progression
   const FEEDBACK_STEP_KG = 2.5;
 
-  // Returns prefill weights adjusted by the feedback stored on the last session's sets.
-  // feedback 'up'   → weight + FEEDBACK_STEP_KG
-  // feedback 'down' → weight − FEEDBACK_STEP_KG (floor at 0)
-  // feedback ''     → weight unchanged
+  /**
+   * Evaluates the last session's performance for a specific exercise and suggests
+   * the appropriate weights for the upcoming session based on the Double-Progression model.
+   *
+   * Rules (per set, evaluated on last session data):
+   * 1. Manual feedback 'up'/'down' always wins
+   * 2. Auto-progress: if ALL sets hit top of rep range AND avg RIR >= 1 → +2.5kg
+   * 3. Auto-deload:   if any set has weight but 0 reps logged → −2.5kg
+   * 4. Otherwise:     keep weight, mark 'maintain'
+   *
+   * @param {string} exId - The unique identifier of the exercise.
+   * @returns {Array<{weight: string, _adjusted: string}>|null} Array of suggested set data, or null if no previous data.
+   */
   function getSuggestedWeights(exId) {
     const lastSets = getLastWeights(exId);
     if (!lastSets) return null;
+
+    // Find target rep ceiling for this exercise
+    const allExs = [...getPlan().cycleA, ...getPlan().cycleB].flatMap(d => d.exercises);
+    const planEx = allExs.find(e => e.id === exId);
+    const repStr = planEx ? planEx.reps : '';
+    const repMatch = repStr.match(/(\d+)(?:[^\d]+(\d+))?/);
+    const repLow  = repMatch ? parseInt(repMatch[1]) : 0;
+    const repHigh = repMatch && repMatch[2] ? parseInt(repMatch[2]) : repLow;
+
+    // Analyse last session
+    const weightedSets = lastSets.filter(s => parseFloat(s.weight) > 0);
+    const allHitTop = weightedSets.length > 0 && weightedSets.every(s => {
+      const r = parseInt(s.reps) || 0;
+      return repHigh > 0 ? r >= repHigh : false;
+    });
+    const avgRIR = weightedSets.length > 0
+      ? weightedSets.reduce((a, s) => a + (parseFloat(s.rir) || 0), 0) / weightedSets.length
+      : 0;
+    const anyEmpty = weightedSets.some(s => !(parseInt(s.reps) > 0));
+
     return lastSets.map(s => {
       const base = parseFloat(s.weight) || 0;
+      // Manual feedback overrides everything
       if (s.feedback === 'up')   return { ...s, weight: String(base + FEEDBACK_STEP_KG), _adjusted: 'up' };
       if (s.feedback === 'down') return { ...s, weight: String(Math.max(0, base - FEEDBACK_STEP_KG)), _adjusted: 'down' };
-      return { ...s, _adjusted: '' };
+      // Auto-progression
+      if (allHitTop && avgRIR >= 1) return { ...s, weight: String(base + FEEDBACK_STEP_KG), _adjusted: 'up' };
+      if (anyEmpty && base > 0)     return { ...s, weight: String(Math.max(0, base - FEEDBACK_STEP_KG)), _adjusted: 'down' };
+      return { ...s, _adjusted: base > 0 ? 'maintain' : '' };
     });
+  }
+
+  /**
+   * Generates a UI label for the progression status of an exercise.
+   *
+   * @param {string} exId - The unique identifier of the exercise.
+   * @returns {{text: string, cls: string}|null} The label object with text and CSS class, or null if no progression data.
+   */
+  function getProgressionLabel(exId) {
+    const suggested = getSuggestedWeights(exId);
+    if (!suggested) return null;
+    const adj = suggested.find(s => s._adjusted)?._adjusted;
+    if (adj === 'up')       return { text: '↑ +2.5kg', cls: 'prog-up' };
+    if (adj === 'down')     return { text: '↓ −2.5kg', cls: 'prog-down' };
+    if (adj === 'maintain') return { text: '= Halten',  cls: 'prog-hold' };
+    return null;
   }
 
   function getExerciseHistory(exId) {
@@ -369,30 +450,161 @@
       .filter(s => s.exercises.some(e => e.id === exId))
       .map(s => {
         const ex = s.exercises.find(e => e.id === exId);
+        if (!ex || !ex.sets) return null;
         const maxW = Math.max(...ex.sets.map(st => parseFloat(st.weight) || 0));
         const totalVol = ex.sets.reduce((a, st) => a + (parseFloat(st.weight) || 0) * (parseInt(st.reps) || 0), 0);
         return { date: s.date, maxWeight: maxW, volume: totalVol };
-      });
+      })
+      .filter(Boolean);
   }
 
-  function getExercisePR(exId) {
-    let pr1rm = 0;
+  function getExerciseMaxWeight(exId) {
+    let maxW = 0;
     state.sessions.forEach(s => {
       s.exercises.forEach(ex => {
-        if (ex.id === exId) {
+        if (ex.id === exId && ex.sets) {
           ex.sets.forEach(st => {
             const w = parseFloat(st.weight) || 0;
-            const r = parseInt(st.reps) || 0;
-            if (w > 0 && r > 0) {
-              const rm = w * (36 / (37 - r));
-              if (rm > pr1rm) pr1rm = rm;
-            }
+            if (w > maxW) maxW = w;
           });
         }
       });
     });
-    return pr1rm;
+    return maxW;
   }
+
+  function calculateE1RM(weight, reps) {
+    if (weight <= 0 || reps <= 0) return 0;
+    if (reps === 1) return weight;
+    // Brzycki formula
+    return weight * (36 / (37 - reps));
+  }
+
+  function getExerciseMaxE1RM(exId) {
+    let maxE1RM = 0;
+    state.sessions.forEach(s => {
+      s.exercises.forEach(ex => {
+        if (ex.id === exId && ex.sets) {
+          ex.sets.forEach(st => {
+            const w = parseFloat(st.weight) || 0;
+            const r = parseInt(st.reps) || 0;
+            const e1rm = calculateE1RM(w, r);
+            if (e1rm > maxE1RM) maxE1RM = e1rm;
+          });
+        }
+      });
+    });
+    return maxE1RM;
+  }
+
+  function triggerPRConfetti() {
+    if (typeof window.confetti !== 'function') return;
+    const duration = 2500;
+    const end = Date.now() + duration;
+
+    (function frame() {
+      window.confetti({
+        particleCount: 5,
+        angle: 60,
+        spread: 55,
+        origin: { x: 0 },
+        colors: ['#22d3a0', '#4f8ef7', '#f7b731']
+      });
+      window.confetti({
+        particleCount: 5,
+        angle: 120,
+        spread: 55,
+        origin: { x: 1 },
+        colors: ['#22d3a0', '#4f8ef7', '#f7b731']
+      });
+
+      if (Date.now() < end) {
+        requestAnimationFrame(frame);
+      }
+    }());
+  }
+
+
+  // ============================================
+  // DASHBOARD 2.0 — Muskelgruppen-Heatmap
+  // ============================================
+
+  const MUSCLE_LABELS = {
+    chest:      'Brust',
+    front_delt: 'Vordere Schulter',
+    side_delt:  'Seitliche Schulter',
+    rear_delt:  'Hintere Schulter',
+    triceps:    'Trizeps',
+    lat:        'Latissimus',
+    upper_back: 'Oberer Rücken',
+    biceps:     'Bizeps',
+    core:       'Core',
+    quad:       'Quadrizeps',
+    hamstring:  'Hamstrings',
+    glute:      'Gesäß',
+    calf:       'Waden'
+  };
+
+  function getMuscleVolume(days) {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const totals = {};
+    Object.keys(MUSCLE_LABELS).forEach(function(m) { totals[m] = 0; });
+    state.sessions.forEach(function(s) {
+      if (new Date(s.date).getTime() < cutoff) return;
+      s.exercises.forEach(function(ex) {
+        var map = (typeof MUSCLE_MAP !== 'undefined') ? MUSCLE_MAP[ex.id] : null;
+        if (!map) return;
+        var doneSets = ex.sets ? ex.sets.filter(function(st) { return st.done || st.reps; }).length : 0;
+        if (doneSets === 0) return;
+        Object.keys(map).forEach(function(muscle) {
+          totals[muscle] = (totals[muscle] || 0) + doneSets * map[muscle];
+        });
+      });
+    });
+    return totals;
+  }
+
+  function renderMuscleHeatmap(container) {
+    if (!container) return;
+    if (!state.sessions.length) {
+      container.innerHTML = '<p class="empty-state">Noch keine Trainingsdaten.</p>';
+      return;
+    }
+    var vol7  = getMuscleVolume(7);
+    var vol28 = getMuscleVolume(28);
+    var max28 = Math.max.apply(null, Object.values(vol28).concat([1]));
+
+    var rows = Object.keys(MUSCLE_LABELS).map(function(key) {
+      var label = MUSCLE_LABELS[key];
+      var v7  = vol7[key]  || 0;
+      var v28val = vol28[key] || 0;
+      var pct28 = Math.round((v28val / max28) * 100);
+      var pct7  = Math.min(Math.round((v7   / max28) * 100), 100);
+      var tier = 'heat-0';
+      if (pct28 > 0)  tier = 'heat-1';
+      if (pct28 > 25) tier = 'heat-2';
+      if (pct28 > 50) tier = 'heat-3';
+      if (pct28 > 75) tier = 'heat-4';
+      var trend = v7 > 0 ? '▲' : '';
+      return '<div class="muscle-row">' +
+        '<div class="muscle-label">' + label + '</div>' +
+        '<div class="muscle-bar-wrap">' +
+          '<div class="muscle-bar ' + tier + '" style="width:' + Math.max(pct28, 2) + '%">' +
+            '<div class="muscle-bar-7d" style="width:' + pct7 + '%"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="muscle-vol">' + (v28val > 0 ? v28val : '–') + ' <span class="muscle-trend">' + trend + '</span></div>' +
+        '</div>';
+    }).join('');
+
+    container.innerHTML =
+      '<div class="muscle-legend">' +
+        '<span class="legend-bar legend-28d"></span>28 Tage&nbsp;&nbsp;' +
+        '<span class="legend-bar legend-7d"></span>7 Tage' +
+      '</div>' + rows;
+  }
+
+
 
   // --- Navigation ---
   function switchView(viewId) {
@@ -418,13 +630,45 @@
     if (viewId === 'viewDashboard') renderDashboard();
   }
 
-  // --- Dashboard ---
+  /**
+   * Renders the main dashboard view, compiling data for day grid,
+   * weekly volume, recent sessions, and various heatmaps.
+   */
   function renderDashboard() {
+    renderZnsWarning();
     renderDayGrid();
     renderWeeklyVolume();
     renderRecentSessions();
     renderHeatmap();
-    updateZnsDisplay();
+    try { renderMuscleHeatmap(document.getElementById('muscleHeatmapContainer')); } catch(e) { console.warn('Muscle heatmap:', e); }
+
+  }
+
+  function renderZnsWarning() {
+    const container = $('znsWarningContainer');
+    if (!container) return;
+
+    // Only warn if ZNS was recorded within the last 36 hours AND value is ≤ 2
+    const zns = state.znsBaseline;
+    const isRecent = zns && zns.date && (Date.now() - new Date(zns.date).getTime()) < 36 * 3600 * 1000;
+    if (isRecent && zns.value <= 2) {
+      container.innerHTML = `
+        <div class="card" style="background: rgba(240, 84, 84, 0.1); border-color: rgba(240, 84, 84, 0.4); margin-bottom: var(--gap-md);">
+          <div style="display:flex; gap:12px; align-items:flex-start;">
+            <div style="font-size: 1.5rem; line-height: 1;">⚠️</div>
+            <div>
+              <h4 style="font-family: var(--font-display); font-size: 0.95rem; color: var(--accent-red); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 800;">ZNS Warnung</h4>
+              <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.5; margin: 0;">
+                ZNS-Readiness aus letzter Session: <strong>${zns.value}/5</strong>.<br>
+                Empfehlung: Reduziere heute Volumen und Intensität (z.B. -1 Arbeitssatz, RIR +1).
+              </p>
+            </div>
+          </div>
+        </div>
+      `;
+    } else {
+      container.innerHTML = '';
+    }
   }
 
   // Populates the Settings view fields from current state.
@@ -433,7 +677,6 @@
     $('settingHeight').value = state.athlete.height;
     $('settingWeight').value = state.athlete.weight;
     $('settingBF').value = state.athlete.bodyFat;
-    if (state.znsBaseline) $('settingBaseline').value = state.znsBaseline;
     if (state.lastBackup) {
       $('lastBackup').innerHTML = `<small>Letztes Backup: ${formatDate(state.lastBackup)}</small>`;
     }
@@ -443,10 +686,10 @@
     const days = getDays(state.currentCycle);
     const grid = $('dayGrid');
     grid.innerHTML = days.map((d, i) => `
-    <div class="day-card ${d.type === 'rest' ? 'rest' : ''}" data-day="${i}" onclick="window.app.openWorkout('${state.currentCycle}', ${i})">
+    <div class="day-card ${d.type === 'rest' ? 'rest' : ''}" data-action="openWorkout" data-cycle="${esc(state.currentCycle)}" data-day="${i}">
       <div class="day-number">Tag ${d.day}</div>
-      <div class="day-name">${d.name}</div>
-      <div class="day-detail">${d.subtitle}</div>
+      <div class="day-name">${esc(d.name)}</div>
+      <div class="day-detail">${esc(d.subtitle)}</div>
       <div class="day-exercises">${d.exercises.length} Übung${d.exercises.length !== 1 ? 'en' : ''}</div>
     </div>
   `).join('');
@@ -458,10 +701,11 @@
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const daysArr = [];
+    const targetDays = 91;
 
-    // Let's generate 91 days (13 weeks)
-    for (let i = 90; i >= 0; i--) {
+    // Create an array for the last 91 days
+    const daysArr = [];
+    for (let i = targetDays - 1; i >= 0; i--) {
       const d = new Date(today);
       d.setDate(d.getDate() - i);
 
@@ -474,9 +718,22 @@
       daysArr.push({ date: d, dateStr: dateStr });
     }
 
+    // Determine the day of the week for the very first calendar day in our array.
+    // getDay() is 0 (Sunday) to 6 (Saturday).
+    // Our CSS grid-template-rows: repeat(7, 1fr) with auto-flow: column 
+    // means it fills Top->Bottom, Left->Right.
+    // If we want row 0 to be Sunday, row 1 Monday, etc., we must pad 
+    // the very first column with empty cells, so the first actual day falls on the correct row.
+    const firstDayOfWeek = daysArr[0].date.getDay(); 
+
+    const finalCells = [];
+    for (let i = 0; i < firstDayOfWeek; i++) {
+        finalCells.push(null); // padding for top rows of the first column
+    }
+    daysArr.forEach(d => finalCells.push(d));
+
     const sessionMap = {};
     state.sessions.forEach(s => {
-      // parse local date properly
       const sd = new Date(s.date);
       const y = sd.getFullYear();
       const m = String(sd.getMonth() + 1).padStart(2, '0');
@@ -486,7 +743,13 @@
     });
 
     let html = '';
-    daysArr.forEach(day => {
+    finalCells.forEach(day => {
+      if (!day) {
+        // Invisible padding cell
+        html += `<div class="heatmap-square" style="background: transparent; box-shadow: none;"></div>`;
+        return;
+      }
+      
       const count = sessionMap[day.dateStr] || 0;
       let level = 0;
       if (count === 1) level = 1;
@@ -497,7 +760,6 @@
 
     container.innerHTML = html;
 
-    // Scroll to right most (newest)
     setTimeout(() => {
       container.scrollLeft = container.scrollWidth;
     }, 10);
@@ -558,48 +820,15 @@
     }
     const recent = state.sessions.slice(-5).reverse();
     list.innerHTML = recent.map(s => `
-    <div class="recent-item" onclick="window.app.showSessionDetail('${s.id}')">
-      <div class="recent-dot ${s.type}"></div>
+    <div class="recent-item" data-action="showSession" data-id="${esc(s.id)}">
+      <div class="recent-dot ${esc(s.type)}"></div>
       <div class="recent-info">
-        <strong>${s.dayName}</strong>
+        <strong>${esc(s.dayName)}</strong>
         <small>${s.exercises.length} Übungen • ${s.duration || '--'} Min</small>
       </div>
       <div class="recent-time">${formatDate(s.date)}</div>
     </div>
   `).join('');
-  }
-
-  // --- ZNS Readiness ---
-  function updateZnsDisplay() {
-    $('znsBaselineDisplay').textContent = state.znsBaseline || '--';
-  }
-
-  function checkZns() {
-    const val = parseFloat($('znsInput').value);
-    if (!val) return toast('Bitte Griffkraft eingeben');
-    if (!state.znsBaseline) return toast('Bitte zuerst Baseline setzen (Einstellungen)');
-
-    const drop = ((state.znsBaseline - val) / state.znsBaseline) * 100;
-    const result = $('znsResult');
-    const badge = $('znsBadge');
-    show(result);
-
-    if (drop > 10) {
-      $('znsResultText').textContent = `⚠️ ${drop.toFixed(1)}% Drop! Volumen um 50% cutten oder GPP-Tag (Zone 2).`;
-      result.className = 'zns-result warning';
-      badge.textContent = 'WARNUNG';
-      badge.className = 'zns-badge warning';
-    } else if (drop > 5) {
-      $('znsResultText').textContent = `⚡ ${drop.toFixed(1)}% Drop. Leicht reduziert – achte auf die Qualität.`;
-      result.className = 'zns-result warning';
-      badge.textContent = 'OK';
-      badge.className = 'zns-badge warning';
-    } else {
-      $('znsResultText').textContent = `✅ ${drop.toFixed(1)}% Drop. ZNS bereit – volle Leistung!`;
-      result.className = 'zns-result good';
-      badge.textContent = 'BEREIT';
-      badge.className = 'zns-badge good';
-    }
   }
 
   // Branded confirm dialog — avoids native browser confirm() which blocks thread and breaks iOS design
@@ -616,7 +845,7 @@
         </div>
       </div>
     `;
-    show($('modalOverlay'));
+    show($('modalOverlay')); focusFirstIn($('modalOverlay'));
     $('confirmOk').addEventListener('click', () => { hide($('modalOverlay')); onConfirm(); });
     $('confirmCancel').addEventListener('click', () => { hide($('modalOverlay')); if (onCancel) onCancel(); });
   }
@@ -647,9 +876,8 @@
       }
     }
 
-    state.activeDayIndex = dayIndex;
     state.activeSession = {
-      id: Date.now().toString(),
+      id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(),
       date: new Date().toISOString(),
       cycle: cycle,
       dayIndex: dayIndex,
@@ -698,10 +926,13 @@
 
     switchView('viewWorkout');
     hide($('bottomNav'));
-    // Push history state for hardware back button support
     window.history.pushState({ modal: 'workout' }, '');
     requestWakeLock();
-    saveState(); // Save fresh session as draft
+    saveState();
+
+    // Nutrition Reminder: show if Milon day (has Milon exercises)
+    const hasMilon = day.exercises.some(e => e.name && e.name.toLowerCase().includes('milon'));
+    if (hasMilon) showNutritionReminder();
   }
 
   function resumeWorkout(cycle, dayIndex) {
@@ -733,6 +964,50 @@
     requestWakeLock();
   }
 
+  // ============================================
+  // NUTRITION TIMING REMINDER
+  // Shown when opening a Milon workout day
+  // ============================================
+  function showNutritionReminder() {
+    // Only show once per session (don't spam on resume)
+    if (state._nutritionReminderShown) return;
+    state._nutritionReminderShown = true;
+
+    $('modalContent').innerHTML = `
+      <div class="modal-header">
+        <h3>🦴 Sehnen-Timing</h3>
+        <button class="btn-close" data-action="closeOverlay">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="nutrition-reminder-card">
+          <div class="nutr-row">
+            <span class="nutr-icon">⏱</span>
+            <div>
+              <div class="nutr-title">45–60 Min vor dem Training</div>
+              <div class="nutr-sub">Jetzt einnehmen für optimale Kollagen-Synthese</div>
+            </div>
+          </div>
+          <div class="nutr-items">
+            <div class="nutr-item">
+              <span class="nutr-badge">15g</span>
+              <span>Kollagen-Peptide</span>
+            </div>
+            <div class="nutr-item">
+              <span class="nutr-badge">50mg</span>
+              <span>Vitamin C</span>
+            </div>
+          </div>
+          <p class="nutr-note">Vitamin C als Kofaktor für Kollagen-Crosslinking. Milon-Exzentrik maximiert den Sehnen-Remodeling-Reiz.</p>
+        </div>
+        <button class="btn btn-primary" style="width:100%;margin-top:12px;" data-action="closeOverlay">
+          Verstanden – Training starten
+        </button>
+      </div>
+    `;
+    show($('modalOverlay')); focusFirstIn($('modalOverlay'));
+    window.history.pushState({ modal: 'overlay' }, '');
+  }
+
   function renderWarmup(type) {
     const protocol = (type === 'push' || type === 'pull') ? PRE_ACTIVATION.pushPull : PRE_ACTIVATION.legs;
     if (type === 'rest') {
@@ -750,7 +1025,7 @@
         <div class="warmup-info">
           <h4>${ex.name}</h4>
           <p>${ex.sets} — ${ex.detail}</p>
-          ${ex.timer ? `<button class="warmup-timer-btn" onclick="window.app.startTimer(${ex.timer}, this)">⏱ ${ex.timer} Sek. Timer</button>` : ''}
+          ${ex.timer ? `<button class="warmup-timer-btn" data-action="startTimer" data-seconds="${ex.timer}">⏱ ${ex.timer} Sek. Timer</button>` : ''}
         </div>
       </div>
     `).join('')}
@@ -768,27 +1043,27 @@
       if (isNoTrack) {
         return `
     <div class="exercise-card ${sessionEx.done ? 'completed' : ''}" id="exCard_${i}">
-      <div class="exercise-header" onclick="window.app.toggleExercise(${i})">
+      <div class="exercise-header" data-action="toggleExercise" data-idx="${i}">
         <div class="exercise-num" style="background:linear-gradient(135deg,var(--accent-green),var(--accent-cyan))">${i + 1}</div>
         <div class="exercise-info">
           <div class="exercise-name">${ex.name}</div>
           <div class="exercise-meta">${ex.reps}</div>
         </div>
         <div class="exercise-actions">
-          <button class="btn-info" onclick="event.stopPropagation(); window.app.showExInfo('${ex.id}')" title="Info">ℹ️</button>
+          <button class="btn-info" data-action="showExInfo" data-id="${ex.id}" title="Info">ℹ️</button>
         </div>
       </div>
       <div class="exercise-body hidden" id="exBody_${i}">
         ${ex.note ? `<p style="font-size:0.78rem;color:var(--accent-amber);margin-bottom:8px;padding:4px 8px;background:rgba(245,158,11,0.08);border-radius:6px;">📌 ${ex.note}</p>` : ''}
         <div class="activity-check-row">
-          <button class="btn ${sessionEx.done ? 'btn-success' : 'btn-outline'} btn-sm" onclick="window.app.toggleActivityDone(${i})">
+          <button class="btn ${sessionEx.done ? 'btn-success' : 'btn-outline'} btn-sm" data-action="toggleActivityDone" data-idx="${i}">
             ${sessionEx.done ? '✅ Erledigt' : '⭕ Als erledigt markieren'}
           </button>
         </div>
         <div class="set-notes" style="margin-top:8px">
           <input type="text" class="input-field" placeholder="Notizen..." id="notes_${i}"
             value="${sessionEx.notes || ''}"
-            onchange="window.app.updateExNotes(${i}, this.value)">
+            data-action="updateExNotes" data-idx="${i}">
         </div>
       </div>
     </div>
@@ -817,20 +1092,20 @@
 
       return `
     <div class="exercise-card" id="exCard_${i}">
-      <div class="exercise-header" onclick="window.app.toggleExercise(${i})">
+      <div class="exercise-header" data-action="toggleExercise" data-idx="${i}">
         <div class="exercise-num">${i + 1}</div>
         <div class="exercise-info">
           <div class="exercise-name">${ex.name}${isUni ? ' <span style="font-size:0.7rem;color:var(--accent-cyan)">(pro Arm)</span>' : ''}</div>
           <div class="exercise-meta">
             ${ex.sets}x ${ex.reps} ${ex.tempo ? `<span class="tempo-tag">${ex.tempo}</span>` : ''}
-            ${recommendOverload ? `<span class="overload-tag" title="Gewicht erhöhen!">🔥 Overload</span>` : ''}
-            ${sessionEx.feedbackAdjusted ? `<span class="feedback-adj-tag" title="Vorschlag aus letztem Feedback">⚖️ Feedback</span>` : ''}
+            ${(() => { const pl = getProgressionLabel(ex.id); return pl ? `<span class="prog-badge ${pl.cls}" title="Doppel-Progression">${pl.text}</span>` : ''; })()}
+            ${recommendOverload && !getProgressionLabel(ex.id) ? `<span class="overload-tag" title="Gewicht erhöhen!">🔥 Overload</span>` : ''}
             <span id="stats_${i}" class="exercise-live-stats" style="color:var(--accent-green);font-size:0.7rem;margin-left:6px;font-weight:700;"></span>
           </div>
         </div>
         <div class="exercise-actions">
-          <button class="btn-info" onclick="event.stopPropagation(); window.app.showExInfo('${ex.id}')" title="Ausführung">ℹ️</button>
-          <button class="btn-info" onclick="event.stopPropagation(); window.app.showExChart('${ex.id}')" title="Fortschritt">📈</button>
+          <button class="btn-info" data-action="showExInfo" data-id="${ex.id}" title="Ausführung">ℹ️</button>
+          <button class="btn-info" data-action="showExChart" data-id="${ex.id}" title="Fortschritt">📈</button>
         </div>
       </div>
       <div class="exercise-body hidden" id="exBody_${i}">
@@ -838,7 +1113,7 @@
         
         <div class="exercise-setup">
           <label class="setup-label">Geräte-Setup / Sitz Position</label>
-          <input type="text" class="input-field input-setup" placeholder="z.B. Sitz 4, Winkel 30°, Pin 3..." value="${sessionEx.setup || ''}" onchange="window.app.updateExSetup(${i}, this.value)">
+          <input type="text" class="input-field input-setup" placeholder="z.B. Sitz 4, Winkel 30°, Pin 3..." value="${sessionEx.setup || ''}" data-action="updateExSetup" data-idx="${i}">
         </div>
 
         ${(() => {
@@ -860,19 +1135,19 @@
                     <label aria-label="Gewicht ${side === 'L' ? 'links' : 'rechts'}">KG</label>
                     <input type="number" class="input-field input-sm" id="w_${i}_${siIdx}" inputmode="decimal"
                       value="${side === 'L' ? lPrefill : rPrefill}"
-                      onchange="window.app.updateSet(${i}, ${siIdx}, 'weight', this.value)">
+                      data-field="weight" data-ex="${i}" data-si="${siIdx}">
                   </div>` : ''}
                   <div class="set-input-group">
                     <label>REPS</label>
                     <input type="number" class="input-field input-sm" id="r_${i}_${siIdx}" inputmode="numeric"
                       value="${side === 'L' ? (lSet.reps || '') : (rSet.reps || '')}"
-                      onchange="window.app.updateSet(${i}, ${siIdx}, 'reps', this.value)">
+                      data-field="reps" data-ex="${i}" data-si="${siIdx}">
                   </div>
                   ${!isBW ? `<div class="set-input-group">
                     <label>RIR</label>
                     <input type="number" class="input-field input-sm" id="rir_${i}_${siIdx}" inputmode="numeric" min="0" max="5"
                       value="${side === 'L' ? (lSet.rir || '') : (rSet.rir || '')}"
-                      onchange="window.app.updateSet(${i}, ${siIdx}, 'rir', this.value)">
+                      data-field="rir" data-ex="${i}" data-si="${siIdx}">
                   </div>` : ''}
                 </div>
               `;
@@ -886,7 +1161,7 @@
                     ${renderInputGroup('R', rSi, 'R')}
                   </div>
                   <div class="set-check-col">
-                    <button class="set-check" id="chk_${i}_${lSi}" onclick="window.app.toggleSetDone(${i}, ${lSi})">✓</button>
+                    <button class="set-check" id="chk_${i}_${lSi}" data-action="toggleSetDone" data-ex="${i}" data-si="${lSi}">✓</button>
                   </div>
                 </div>
               `;
@@ -903,30 +1178,30 @@
                       <div class="weight-prefill-wrap">
                         <input type="number" class="input-field input-sm" id="w_${i}_${si}" inputmode="decimal"
                           value="${prefillW}"
-                          onchange="window.app.updateSet(${i}, ${si}, 'weight', this.value)">
+                          data-field="weight" data-ex="${i}" data-si="${si}">
                       </div>
                     </div>` : ''}
                     <div class="set-input-group">
                       <label>REPS</label>
                       <input type="number" class="input-field input-sm" id="r_${i}_${si}" inputmode="numeric"
                         value="${sessionEx.sets[si].reps || ''}"
-                        onchange="window.app.updateSet(${i}, ${si}, 'reps', this.value)">
+                        data-field="reps" data-ex="${i}" data-si="${si}">
                     </div>
                     ${!isBW ? `<div class="set-input-group">
                       <label>RIR</label>
                       <input type="number" class="input-field input-sm" id="rir_${i}_${si}" inputmode="numeric" min="0" max="5"
                         value="${sessionEx.sets[si].rir || ''}"
-                        onchange="window.app.updateSet(${i}, ${si}, 'rir', this.value)">
+                        data-field="rir" data-ex="${i}" data-si="${si}">
                     </div>` : ''}
                     <div class="set-input-group feedback-group">
                       <label>NEXT</label>
                       <div class="feedback-btns">
-                        <button class="fb-btn fb-up" id="fb_up_${i}_${si}" onclick="window.app.setFeedback(${i}, ${si}, 'up')" title="Nächstes Mal erhöhen">▲</button>
-                        <button class="fb-btn fb-down" id="fb_dn_${i}_${si}" onclick="window.app.setFeedback(${i}, ${si}, 'down')" title="Nächstes Mal senken">▼</button>
+                        <button class="fb-btn fb-up" id="fb_up_${i}_${si}" data-action="feedback-up" data-ex="${i}" data-si="${si}" title="Nächstes Mal erhöhen">▲</button>
+                        <button class="fb-btn fb-down" id="fb_dn_${i}_${si}" data-action="feedback-down" data-ex="${i}" data-si="${si}" title="Nächstes Mal senken">▼</button>
                       </div>
                     </div>
                   </div>
-                  <button class="set-check" id="chk_${i}_${si}" onclick="window.app.toggleSetDone(${i}, ${si})">✓</button>
+                  <button class="set-check" id="chk_${i}_${si}" data-action="toggleSetDone" data-ex="${i}" data-si="${si}">✓</button>
                 </div>
               `;
             }).join('');
@@ -935,7 +1210,7 @@
         <div class="set-notes">
           <input type="text" class="input-field" placeholder="Notizen..." id="notes_${i}"
             value="${sessionEx.notes || ''}"
-            onchange="window.app.updateExNotes(${i}, this.value)">
+            data-action="updateExNotes" data-idx="${i}">
         </div>
       </div>
     </div>
@@ -999,35 +1274,17 @@
     if (!state.activeSession) return;
     const ex = state.activeSession.exercises[exIdx];
     let vol = 0;
-    let max1rm = 0;
     ex.sets.forEach(s => {
       const w = parseFloat(s.weight) || 0;
       const r = parseInt(s.reps) || 0;
       if (w > 0 && r > 0) {
         vol += (w * r);
-        const rm = w * (36 / (37 - r)); // Brzycki formula
-        if (rm > max1rm) max1rm = rm;
       }
     });
 
     const el = $(`stats_${exIdx}`);
     if (el) {
-      if (vol > 0) {
-        const pr = getExercisePR(ex.id);
-        const isPr = max1rm > 0 && max1rm > pr;
-
-        let html = `&Sigma; ${Math.round(vol)}kg | 1RM ~${Math.round(max1rm)}kg`;
-        if (isPr) {
-          html += ' <span style="color:#facc15; text-shadow: 0 0 5px rgba(250,204,21,0.5);">🏆 PR!</span>';
-          el.dataset.pr = 'true';
-        } else {
-          el.dataset.pr = 'false';
-        }
-        el.innerHTML = html;
-      } else {
-        el.innerHTML = '';
-        el.dataset.pr = 'false';
-      }
+      el.innerHTML = vol > 0 ? `&Sigma; ${Math.round(vol)} kg` : '';
     }
   }
 
@@ -1039,6 +1296,7 @@
     const dnBtn = $(`fb_dn_${exIdx}_${setIdx}`);
     upBtn.classList.toggle('active', set.feedback === 'up');
     dnBtn.classList.toggle('active', set.feedback === 'down');
+    debouncedSave();
   }
 
   function updateExNotes(exIdx, value) {
@@ -1057,25 +1315,54 @@
 
   function toggleSetDone(exIdx, setIdx) {
     if (!state.activeSession) return;
-    const set = state.activeSession.exercises[exIdx].sets[setIdx];
-    set.done = !set.done;
-    const btn = $(`chk_${exIdx}_${setIdx}`);
-    btn.classList.toggle('checked', set.done);
+    const ex = state.activeSession.exercises[exIdx];
+    const isUni = ex.unilateral;
+    
+    let isDoneNow = false;
+    if (isUni) {
+      const half = ex.sets.length / 2;
+      const lSi = setIdx < half ? setIdx : setIdx - half;
+      const rSi = lSi + half;
+      const newState = !ex.sets[lSi].done;
+      ex.sets[lSi].done = newState;
+      if (ex.sets[rSi]) ex.sets[rSi].done = newState;
+      isDoneNow = newState;
+    } else {
+      const set = ex.sets[setIdx];
+      set.done = !set.done;
+      isDoneNow = set.done;
+    }
+
+    const btnId = isUni ? `chk_${exIdx}_${setIdx < ex.sets.length / 2 ? setIdx : setIdx - ex.sets.length / 2}` : `chk_${exIdx}_${setIdx}`;
+    const btn = $(btnId);
+    if (btn) btn.classList.toggle('checked', isDoneNow);
 
     // Auto-Rest Timer & Confetti
-    if (set.done) {
+    if (isDoneNow) {
       // Haptic feedback on set complete
       if (navigator.vibrate) navigator.vibrate(50);
       const planEx = [...getPlan().cycleA, ...getPlan().cycleB]
         .flatMap(d => d.exercises)
         .find(e => e.id === state.activeSession.exercises[exIdx].id);
+      
+      // PR Check (e1RM)
+      if (!state.activeSession.exercises[exIdx].noTracking && !planEx.isBodyweightOnly) {
+         const setInfo = ex.sets[setIdx];
+         const w = parseFloat(setInfo.weight) || 0;
+         const r = parseInt(setInfo.reps) || 0;
+         const setE1RM = calculateE1RM(w, r);
+         const historicMaxE1RM = getExerciseMaxE1RM(state.activeSession.exercises[exIdx].id);
+         
+         // Only trigger if we have some historic data AND this set beats the strict previous max
+         // AND it's a relatively meaningful weight/reps combination.
+         if (historicMaxE1RM > 0 && setE1RM > historicMaxE1RM && w > 0 && r > 0) {
+            triggerPRConfetti();
+            toast(`🎉 Neuer PR! Geschätztes 1RM: ${setE1RM.toFixed(1)} kg`);
+         }
+      }
+
       const restSeconds = (planEx && planEx.restSeconds) || DEFAULT_REST_SECONDS;
       startRestTimer(restSeconds);
-
-      const el = $(`stats_${exIdx}`);
-      if (el && el.dataset.pr === 'true') {
-        fireConfetti();
-      }
     } else {
       closeRestTimer();
     }
@@ -1083,7 +1370,8 @@
     // Check if all sets of exercise are done
     const allDone = state.activeSession.exercises[exIdx].sets.every(s => s.done);
     const card = $(`exCard_${exIdx}`);
-    card.classList.toggle('completed', allDone);
+    if (card) card.classList.toggle('completed', allDone);
+    debouncedSave();
   }
 
   function toggleActivityDone(exIdx) {
@@ -1104,10 +1392,29 @@
         btnRow.textContent = '⭕ Als erledigt markieren';
       }
     }
+    debouncedSave();
   }
 
-  function finishWorkout() {
+  function openFinishModal() {
     if (!state.activeSession) return;
+    show($('finishModal')); focusFirstIn($('finishModal'));
+    window.history.pushState({ modal: 'finish' }, '');
+  }
+
+  function confirmFinishWorkout() {
+    if (!state.activeSession) return;
+    
+    // Capture RPE and ZNS
+    const rpe = parseFloat($('sessionRpeSlider').value) || 8;
+    const zns = parseInt($('znsSlider').value) || 3;
+    state.activeSession.sessionRpe = rpe;
+    state.activeSession.znsReadiness = zns;
+    
+    // Set global baseline ZNS to last captured (with timestamp for expiry check)
+    state.znsBaseline = { value: zns, date: new Date().toISOString() };
+
+    hide($('finishModal'));
+
     if (state.timerInterval) clearInterval(state.timerInterval);
     closeRestTimer();
     releaseWakeLock();
@@ -1121,6 +1428,7 @@
     // Clear active state
     state.activeSession = null;
     state.workoutStartTime = null;
+    state._nutritionReminderShown = false;
 
     show($('bottomNav'));
     switchView('viewDashboard');
@@ -1180,6 +1488,7 @@
       if (remaining <= 0) {
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
         _restTimerRAF = null;
+        card.classList.add('hidden');
         return;
       }
       _restTimerRAF = requestAnimationFrame(tick);
@@ -1209,62 +1518,99 @@
     <p>${ex.guide}</p>
     ${ex.acl_warning ? `<div class="warning-box">⚠️ ACL/Kapsel-Schutz: ROM zwingend 2-3cm vor der Endgradigkeit limitieren!</div>` : ''}
   `;
-    show($('infoModal'));
+    show($('infoModal')); focusFirstIn($('infoModal'));
     window.history.pushState({ modal: 'info' }, '');
   }
 
   // --- History ---
-  function renderHistory() {
-    const list = $('historyList');
-    const stats = $('historyStats');
+  // Current history tab state
+  let _histTab = 'sessions'; // 'sessions' | 'charts' | 'prs'
 
-    if (!state.sessions.length) {
-      list.innerHTML = '<p class="empty-state">Noch keine Trainings aufgezeichnet.</p>';
-      stats.innerHTML = '';
-      return;
-    }
+  function renderHistory() {
+    const stats = $('historyStats');
 
     const totalSessions = state.sessions.length;
     const totalVolume = state.sessions.reduce((acc, s) => {
       return acc + s.exercises.reduce((a, ex) => {
+        if (ex.noTracking || !ex.sets) return a;
         return a + ex.sets.reduce((a2, set) => a2 + (parseFloat(set.weight || 0) * parseInt(set.reps || 0)), 0);
       }, 0);
     }, 0);
     const thisWeek = state.sessions.filter(s => {
       const d = new Date(s.date);
-      const now = new Date();
-      const diff = (now - d) / (1000 * 60 * 60 * 24);
+      const diff = (new Date() - d) / (1000 * 60 * 60 * 24);
       return diff <= 7;
     }).length;
 
     stats.innerHTML = `
-    <div class="stat-card"><div class="stat-value">${totalSessions}</div><div class="stat-label">Trainings</div></div>
-    <div class="stat-card"><div class="stat-value">${thisWeek}</div><div class="stat-label">Diese Woche</div></div>
-    <div class="stat-card"><div class="stat-value">${(totalVolume / 1000).toFixed(1)}t</div><div class="stat-label">Volumen</div></div>
-  `;
+      <div class="stat-card"><div class="stat-value">${totalSessions}</div><div class="stat-label">Trainings</div></div>
+      <div class="stat-card"><div class="stat-value">${thisWeek}</div><div class="stat-label">Diese Woche</div></div>
+      <div class="stat-card"><div class="stat-value">${(totalVolume / 1000).toFixed(1)}t</div><div class="stat-label">Volumen</div></div>
+    `;
 
-    // Progress Chart section
-    const chartContainer = document.getElementById('progressCharts') || (() => {
-      const div = document.createElement('div');
-      div.id = 'progressCharts';
-      list.parentNode.insertBefore(div, list);
-      return div;
-    })();
-    renderProgressCharts(chartContainer);
+    renderHistoryTab(_histTab);
+  }
 
-    list.innerHTML = state.sessions.slice().reverse().map(s => `
-    <div class="history-item" onclick="window.app.showSessionDetail('${s.id}')">
-      <div class="history-item-header">
-        <h4>${s.dayName}</h4>
-        <span class="history-date">${formatDate(s.date)}</span>
-      </div>
-      <div class="history-item-stats">
-        <span class="history-item-stat"><strong>${s.exercises.length}</strong> Übungen</span>
-        <span class="history-item-stat"><strong>${s.duration || '--'}</strong> Min</span>
-        <span class="history-item-stat">Zyklus <strong>${s.cycle}</strong></span>
-      </div>
-    </div>
-  `).join('');
+  function renderHistoryTab(tab) {
+    _histTab = tab;
+    const list = $('historyList');
+
+    // Update tab buttons
+    document.querySelectorAll('.hist-tab').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tab === tab);
+    });
+
+    if (!state.sessions.length) {
+      list.innerHTML = '<p class="empty-state">Noch keine Trainings aufgezeichnet.</p>';
+      return;
+    }
+
+    if (tab === 'sessions') {
+      list.innerHTML = state.sessions.slice().reverse().map(s => {
+        const rpeHtml = s.sessionRpe ? `<span class="history-item-stat">RPE <strong>${s.sessionRpe}</strong></span>` : '';
+        const znsHtml = s.znsReadiness ? `<span class="history-item-stat">ZNS <strong>${s.znsReadiness}</strong></span>` : '';
+        return `
+        <div class="history-item" data-action="showSession" data-id="${esc(s.id)}">
+          <div class="history-item-header">
+            <h4>${esc(s.dayName)}</h4>
+            <span class="history-date">${formatDate(s.date)}</span>
+          </div>
+          <div class="history-item-stats">
+            <span class="history-item-stat history-dot ${s.type}"></span>
+            <span class="history-item-stat"><strong>${s.exercises.length}</strong> Übungen</span>
+            <span class="history-item-stat"><strong>${s.duration || '--'}</strong> Min</span>
+            ${rpeHtml}
+            ${znsHtml}
+          </div>
+        </div>`;
+      }).join('');
+
+    } else if (tab === 'charts') {
+      list.innerHTML = '<div id="progressCharts"></div>';
+      renderProgressCharts($('progressCharts'));
+
+    } else if (tab === 'prs') {
+      // Full PR table per exercise
+      const allExs = [...getPlan().cycleA, ...getPlan().cycleB].flatMap(d => d.exercises)
+        .filter(e => !e.noTracking && !e.isBodyweightOnly);
+
+      const rows = allExs.map(ex => {
+        const maxW = getExerciseMaxWeight(ex.id);
+        const hist = getExerciseHistory(ex.id);
+        const sessions = hist.length;
+        if (!sessions) return '';
+        return `
+          <div class="pr-table-row" data-action="showExChart" data-id="${esc(ex.id)}">
+            <div class="pr-table-name">${esc(ex.name)}</div>
+            <div class="pr-table-stats">
+              <span class="pr-stat-pill">${maxW > 0 ? maxW + ' kg Max' : '–'}</span>
+              <span class="pr-stat-sub">${sessions} Session${sessions !== 1 ? 's' : ''}</span>
+            </div>
+          </div>`;
+      }).filter(Boolean).join('');
+
+      list.innerHTML = rows || '<p class="empty-state">Noch keine Gewichtsdaten erfasst.</p>';
+    }
   }
 
   // --- Progress Charts ---
@@ -1273,6 +1619,7 @@
     const exerciseMap = new Map();
     state.sessions.forEach(s => {
       s.exercises.forEach(ex => {
+        if (ex.noTracking || !ex.sets) return;
         if (!exerciseMap.has(ex.id)) exerciseMap.set(ex.id, ex.name);
       });
     });
@@ -1297,8 +1644,8 @@
               ${exerciseOptions}
             </select>
             <div class="chart-toggle">
-              <button class="chart-tab active" data-metric="weight" onclick="window.app.switchChartMetric('weight')">Gewicht</button>
-              <button class="chart-tab" data-metric="volume" onclick="window.app.switchChartMetric('volume')">Volumen</button>
+              <button class="chart-tab active" data-metric="weight" data-action="switchChartMetric" data-value="weight">Gewicht</button>
+              <button class="chart-tab" data-metric="volume" data-action="switchChartMetric" data-value="volume">Volumen</button>
             </div>
           </div>
           <div id="chartArea" class="chart-area"></div>
@@ -1364,13 +1711,13 @@
     }).join('');
 
     const dots = points.map(p =>
-      `<circle cx="${p.x}" cy="${p.y}" r="4" fill="#3b82f6" stroke="#0f172a" stroke-width="2"/>
+      `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--accent-blue)" stroke="var(--bg-secondary)" stroke-width="2"/>
              <title>${Math.round(p.v)} ${metric === 'weight' ? 'kg' : 'vol'}</title>`
     ).join('');
 
     // Trend arrow
     const trend = values.length >= 2 ? values[values.length - 1] - values[0] : 0;
-    const trendColor = trend > 0 ? '#10b981' : trend < 0 ? '#ef4444' : '#94a3b8';
+    const trendColor = trend > 0 ? 'var(--accent-green)' : trend < 0 ? 'var(--accent-red)' : 'var(--text-secondary)';
     const trendIcon = trend > 0 ? '↑' : trend < 0 ? '↓' : '→';
     const trendText = `${trendIcon} ${Math.abs(Math.round(trend))} ${metric === 'weight' ? 'kg' : ''}`;
 
@@ -1379,14 +1726,14 @@
         <svg viewBox="0 0 ${W} ${H}" class="chart-svg">
           <defs>
             <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.3"/>
-              <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+              <stop offset="0%" stop-color="var(--accent-blue)" stop-opacity="0.3"/>
+              <stop offset="100%" stop-color="var(--accent-blue)" stop-opacity="0"/>
             </linearGradient>
           </defs>
           ${yLabels}
           ${xLabels}
           <path d="${areaPath}" fill="url(#chartGrad)" />
-          <polyline points="${polyline}" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+          <polyline points="${polyline}" fill="none" stroke="var(--accent-blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
           ${dots}
         </svg>
         `;
@@ -1401,7 +1748,7 @@
     if (history.length < 1) {
       $('infoModalTitle').textContent = name + ' – Fortschritt';
       $('infoModalBody').innerHTML = '<p class="empty-state">Noch keine Daten aufgezeichnet.</p>';
-      show($('infoModal'));
+      show($('infoModal')); focusFirstIn($('infoModal'));
       window.history.pushState({ modal: 'info' }, '');
       return;
     }
@@ -1421,20 +1768,20 @@
     });
     const polyline = points.map(p => `${p.x},${p.y}`).join(' ');
     const trend = values.length >= 2 ? values[values.length - 1] - values[0] : 0;
-    const trendColor = trend > 0 ? '#10b981' : trend < 0 ? '#ef4444' : '#94a3b8';
+    const trendColor = trend > 0 ? 'var(--accent-green)' : trend < 0 ? 'var(--accent-red)' : 'var(--text-secondary)';
 
     $('infoModalTitle').textContent = name + ' – Fortschritt';
     $('infoModalBody').innerHTML = `
             <p style="color:${trendColor};font-weight:700;">${trend > 0 ? '↑' : trend < 0 ? '↓' : '→'} ${Math.abs(Math.round(trend))} kg seit Start</p>
             <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;margin-top:8px;">
               ${points.map((p, i) => `<text x="${p.x}" y="${H - 3}" text-anchor="middle" fill="#64748b" font-size="9">${labels[i]}</text>`).join('')}
-              <polyline points="${polyline}" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
-              ${points.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="#3b82f6" stroke="#0f172a" stroke-width="2"/>`).join('')}
+              <polyline points="${polyline}" fill="none" stroke="var(--accent-blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+              ${points.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--accent-blue)" stroke="var(--bg-secondary)" stroke-width="2"/>`).join('')}
             </svg>
             <h4>Gewichtsverlauf</h4>
             ${history.map(h => `<p style="font-size:0.82rem;">${formatDate(h.date)}: <strong>${h.maxWeight} kg</strong> (Vol: ${h.volume})</p>`).join('')}
         `;
-    show($('infoModal'));
+    show($('infoModal')); focusFirstIn($('infoModal'));
     window.history.pushState({ modal: 'info' }, '');
   }
 
@@ -1444,23 +1791,23 @@
 
     $('modalContent').innerHTML = `
     <div class="modal-header">
-      <h3>${session.dayName}</h3>
-      <button class="btn-close" onclick="document.getElementById('modalOverlay').classList.add('hidden')">&times;</button>
+      <h3>${esc(session.dayName)}</h3>
+      <button class="btn-close" data-action="closeOverlay">&times;</button>
     </div>
     <div class="modal-body">
-      <p>${formatDate(session.date)} • ${session.duration || '--'} Min • Zyklus ${session.cycle}</p>
+      <p>${formatDate(session.date)} • ${session.duration || '--'} Min • Zyklus ${esc(session.cycle)}</p>
       <div class="history-detail-exercises">
         ${session.exercises.map(ex => `
           <div class="history-detail-exercise">
-            <h5>${ex.name}</h5>
+            <h5>${esc(ex.name)}</h5>
             ${ex.noTracking
               ? `<p style="font-size:0.78rem;color:var(--text-muted);">${ex.done ? '✅ Erledigt' : '⭕ Nicht abgehakt'}</p>`
               : (ex.sets || []).map((s, i) => `
               <div class="history-detail-set">
                 <span>Satz ${i + 1}</span>
-                <span>${s.weight || '-'} kg</span>
-                <span>${s.reps || '-'} Reps</span>
-                <span>RIR ${s.rir || '-'}</span>
+                <span>${esc(String(s.weight || '-'))} kg</span>
+                <span>${esc(String(s.reps || '-'))} Reps</span>
+                <span>RIR ${esc(String(s.rir || '-'))}</span>
               </div>
             `).join('')
             }
@@ -1468,11 +1815,11 @@
         `).join('')}
       </div>
       <div style="margin-top:16px;">
-        <button class="btn btn-danger btn-sm" onclick="window.app.deleteSession('${id}')">Löschen</button>
+        <button class="btn btn-danger btn-sm" data-action="deleteSession" data-id="${esc(id)}">Löschen</button>
       </div>
     </div>
   `;
-    show($('modalOverlay'));
+    show($('modalOverlay')); focusFirstIn($('modalOverlay'));
     window.history.pushState({ modal: 'overlay' }, '');
   }
 
@@ -1487,7 +1834,7 @@
         renderDashboard();
         toast('Training gelöscht');
       },
-      null,
+      () => { showSessionDetail(id); },
       { confirmLabel: 'Löschen', cancelLabel: 'Abbrechen' }
     );
   }
@@ -1525,45 +1872,52 @@
 
   function handleImport(e) {
     const file = e.target.files[0];
+    e.target.value = ''; // reset so re-selecting same file fires change again
     if (!file) return;
     const reader = new FileReader();
+    reader.onerror = () => toast('❌ Datei konnte nicht gelesen werden');
     reader.onload = function (ev) {
       try {
-        const data = JSON.parse(ev.target.result);
-        if (data.version && data.state) {
-          state.znsBaseline = data.state.znsBaseline || state.znsBaseline;
-          state.athlete = data.state.athlete || state.athlete;
-          state.sessions = data.state.sessions || state.sessions;
-          state.customPlan = data.state.customPlan || state.customPlan;
+        const raw = ev.target.result;
+        if (!raw || !raw.trim()) { toast('❌ Datei ist leer'); return; }
+        const data = JSON.parse(raw);
+
+        // Format A: PPL-8 JSON Export { version, state: { sessions, athlete, ... } }
+        if (data.version && data.state && typeof data.state === 'object') {
+          const s = data.state;
+          if (s.sessions)    state.sessions    = s.sessions;
+          if (s.athlete)     state.athlete     = s.athlete;
+          if (s.customPlan)  state.customPlan  = s.customPlan;
+          if (s.znsBaseline) state.znsBaseline = s.znsBaseline;
           saveState();
           renderDashboard();
           populateSettingsForm();
-          toast('Daten importiert! ✅');
-        } else {
-          toast('Ungültiges Backup-Format');
+          toast('✅ Import erfolgreich! ' + (s.sessions ? s.sessions.length : 0) + ' Sessions geladen.');
+          return;
         }
+
+        // Format B: Gist Sync Payload { stateVersion, sessions, athlete, ... }
+        if (data.sessions && Array.isArray(data.sessions)) {
+          state.sessions = data.sessions;
+          if (data.athlete)    state.athlete    = data.athlete;
+          if (data.customPlan) state.customPlan = data.customPlan;
+          saveState();
+          renderDashboard();
+          populateSettingsForm();
+          toast('✅ Import erfolgreich! ' + data.sessions.length + ' Sessions geladen.');
+          return;
+        }
+
+        toast('❌ Unbekanntes Backup-Format');
       } catch (err) {
-        toast('Fehler beim Import');
+        console.error('Import error:', err);
+        toast('❌ JSON ungültig: ' + err.message);
       }
     };
     reader.readAsText(file);
-    e.target.value = '';
   }
 
-  // --- Confetti FX ---
-  function fireConfetti() {
-    const colors = ['#facc15', '#3b82f6', '#10b981', '#ef4444', '#a855f7'];
-    for (let i = 0; i < 40; i++) {
-      const conf = document.createElement('div');
-      conf.className = 'confetti';
-      conf.style.left = Math.random() * 100 + 'vw';
-      conf.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
-      conf.style.animationDelay = Math.random() * 0.5 + 's';
-      conf.style.animationDuration = Math.random() * 1 + 1.5 + 's';
-      document.body.appendChild(conf);
-      setTimeout(() => conf.remove(), 3000);
-    }
-  }
+
 
   // --- Plan Editor ---
   function openPlanEditor() {
@@ -1573,24 +1927,24 @@
     $('modalContent').innerHTML = `
     <div class="modal-header">
       <h3>Trainingsplan bearbeiten</h3>
-      <button class="btn-close" onclick="document.getElementById('modalOverlay').classList.add('hidden')">&times;</button>
+      <button class="btn-close" data-action="closeOverlay">&times;</button>
     </div>
     <div class="modal-body plan-editor">
       ${allDays.map((day, di) => `
         <div class="plan-editor-day">
-          <h4>Tag ${day.day}: ${day.name}</h4>
+          <h4>Tag ${day.day}: ${esc(day.name)}</h4>
           ${day.exercises.map((ex, ei) => `
             <div class="plan-exercise-item">
-              <span>${ex.name} — ${ex.sets}x${ex.reps}</span>
-              <button class="btn-delete-ex" onclick="window.app.removeExercise(${di}, ${ei})">✕</button>
+              <span>${esc(ex.name)} — ${ex.sets}x${esc(ex.reps)}</span>
+              <button class="btn-delete-ex" data-action="removeExercise" data-day="${di}" data-ex="${ei}">✕</button>
             </div>
           `).join('')}
-          <button class="btn-add-exercise" onclick="window.app.addExercisePrompt(${di})">+ Übung hinzufügen</button>
+          <button class="btn-add-exercise" data-action="addExercise" data-day="${di}">+ Übung hinzufügen</button>
         </div>
       `).join('')}
     </div>
   `;
-    show($('modalOverlay'));
+    show($('modalOverlay')); focusFirstIn($('modalOverlay'));
     window.history.pushState({ modal: 'overlay' }, '');
   }
 
@@ -1599,7 +1953,7 @@
     $('modalContent').innerHTML = `
       <div class="modal-header">
         <h3>Übung hinzufügen</h3>
-        <button class="btn-close" onclick="document.getElementById('modalOverlay').classList.add('hidden')">&times;</button>
+        <button class="btn-close" data-action="closeOverlay">&times;</button>
       </div>
       <div class="modal-body">
         <div style="display:flex;flex-direction:column;gap:12px;">
@@ -1624,7 +1978,7 @@
         </div>
       </div>
     `;
-    show($('modalOverlay'));
+    show($('modalOverlay')); focusFirstIn($('modalOverlay'));
     window.history.pushState({ modal: 'overlay' }, '');
 
     $('addExName').focus();
@@ -1639,7 +1993,7 @@
       if (!state.customPlan) state.customPlan = JSON.parse(JSON.stringify(TRAINING_PLAN));
       const allDays = [...state.customPlan.cycleA, ...state.customPlan.cycleB];
       allDays[dayIdx].exercises.push({
-        id: 'custom_' + Date.now(),
+        id: 'custom_' + ((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now()),
         name, sets, reps, tempo: null, note: '',
         guide: 'Noch keine Anleitung hinterlegt.'
       });
@@ -1670,14 +2024,10 @@
 
   // --- Settings ---
   function saveBaseline() {
-    const val = parseFloat($('settingBaseline').value);
-    if (!val) return toast('Bitte Wert eingeben');
-    state.znsBaseline = val;
     state.athlete.height = parseInt($('settingHeight').value) || 200;
     state.athlete.weight = parseInt($('settingWeight').value) || 94;
     state.athlete.bodyFat = parseInt($('settingBF').value) || 13;
     saveState();
-    updateZnsDisplay();
     populateSettingsForm();
     toast('Gespeichert ✅');
   }
@@ -1693,6 +2043,8 @@
           state.sessions = [];
           state.customPlan = null;
           state.znsBaseline = null;
+          state.activeSession = null;
+          state.workoutStartTime = null;
           renderDashboard();
           toast('Alle Daten gelöscht');
         },
@@ -1729,14 +2081,6 @@
       });
     });
 
-    // ZNS
-    $('btnZnsCheck').addEventListener('click', checkZns);
-    $('znsInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') checkZns(); });
-    $('btnSetBaseline').addEventListener('click', () => {
-      switchView('viewSettings');
-      $('settingBaseline').focus();
-    });
-
     // System toggle
     $('btnSystemToggle').addEventListener('click', () => toggleCollapsible('systemBody', 'btnSystemToggle'));
 
@@ -1744,11 +2088,11 @@
     $('btnWarmupToggle').addEventListener('click', () => toggleCollapsible('warmupBody', 'btnWarmupExpand'));
 
     // Workout
-    $('btnFinishWorkout').addEventListener('click', finishWorkout);
+    $('btnFinishWorkout').addEventListener('click', openFinishModal);
     $('btnBackFromWorkout').addEventListener('click', backFromWorkout);
 
     // Settings
-    $('btnSaveBaseline').addEventListener('click', saveBaseline);
+    const btnSaveBaseline = $('btnSaveBaseline'); if (btnSaveBaseline) btnSaveBaseline.addEventListener('click', saveBaseline);
     $('btnExportData').addEventListener('click', exportData);
     const btnExportCSV = document.getElementById('btnExportCSV');
     if (btnExportCSV) btnExportCSV.addEventListener('click', exportCSV);
@@ -1767,6 +2111,8 @@
     if (btnGistPush) btnGistPush.addEventListener('click', gistPush);
     if (btnGistPull) btnGistPull.addEventListener('click', gistPull);
     if (btnSaveGist) btnSaveGist.addEventListener('click', saveGistSettings);
+    const btnGistDiag = document.getElementById('btnGistDiag');
+    if (btnGistDiag) btnGistDiag.addEventListener('click', window.gistDiagnose);
 
     // Populate token field if already stored
     const tokenInput = document.getElementById('gistTokenInput');
@@ -1778,24 +2124,127 @@
     const btnCloseRestTimer = document.getElementById('btnCloseRestTimer');
     if (btnCloseRestTimer) btnCloseRestTimer.addEventListener('click', closeRestTimer);
 
+    // Finish Modal — RPE/ZNS sliders, confirm, close, backdrop
+    $('btnConfirmFinish').addEventListener('click', confirmFinishWorkout);
+    $('btnCloseFinish').addEventListener('click', () => hide($('finishModal')));
+    $('sessionRpeSlider').addEventListener('input', function() {
+      $('sessionRpeDisplay').textContent = parseFloat(this.value).toFixed(1);
+    });
+    $('znsSlider').addEventListener('input', function() {
+      $('znsDisplay').textContent = this.value;
+    });
+    $('finishModal').addEventListener('click', (e) => {
+      if (e.target === $('finishModal')) hide($('finishModal'));
+    });
+
     // Modals
-    $('btnCloseInfo').addEventListener('click', () => { hide($('infoModal')); });
-    $('btnCloseEdit').addEventListener('click', () => { hide($('editModal')); });
+    const _bci = $('btnCloseInfo'); if(_bci) _bci.addEventListener('click', () => { hide($('infoModal')); });
+    const _bce = $('btnCloseEdit'); if(_bce) _bce.addEventListener('click', () => { hide($('editModal')); });
     $('infoModal').addEventListener('click', (e) => { if (e.target === $('infoModal')) hide($('infoModal')); });
     $('modalOverlay').addEventListener('click', (e) => { if (e.target === $('modalOverlay')) hide($('modalOverlay')); });
 
+
+    // ── Delegated click: Day Grid ──────────────────────────────────────
+    $('dayGrid').addEventListener('click', e => {
+      const card = e.target.closest('[data-action="openWorkout"]');
+      if (card) openWorkout(card.dataset.cycle, parseInt(card.dataset.day));
+    });
+
+    // ── Delegated click: Recent Sessions (dashboard) ───────────────────
+    $('recentList').addEventListener('click', e => {
+      const item = e.target.closest('[data-action="showSession"]');
+      if (item) showSessionDetail(item.dataset.id);
+    });
+
+    // ── Delegated click: Warmup timer buttons ──────────────────────────
+    $('warmupBody').addEventListener('click', e => {
+      const btn = e.target.closest('[data-action="startTimer"]');
+      if (btn) startTimer(parseInt(btn.dataset.seconds), btn);
+    });
+
+    // ── Delegated click: Exercise List (workout view) ──────────────────
+    $('exerciseList').addEventListener('click', e => {
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      if (action === 'toggleExercise') {
+        toggleExercise(+btn.dataset.idx);
+      } else if (action === 'showExInfo') {
+        e.stopPropagation();
+        showExInfo(btn.dataset.id);
+      } else if (action === 'showExChart') {
+        e.stopPropagation();
+        showExChart(btn.dataset.id);
+      } else if (action === 'toggleSetDone') {
+        toggleSetDone(+btn.dataset.ex, +btn.dataset.si);
+      } else if (action === 'feedback-up') {
+        setFeedback(+btn.dataset.ex, +btn.dataset.si, 'up');
+      } else if (action === 'feedback-down') {
+        setFeedback(+btn.dataset.ex, +btn.dataset.si, 'down');
+      } else if (action === 'toggleActivityDone') {
+        toggleActivityDone(+btn.dataset.idx);
+      }
+    });
+
+    // ── Delegated input: Exercise List (all text/number inputs) ────────
+    $('exerciseList').addEventListener('input', e => {
+      const el = e.target;
+      if (el.dataset.field !== undefined && el.dataset.ex !== undefined) {
+        updateSet(+el.dataset.ex, +el.dataset.si, el.dataset.field, el.value);
+      } else if (el.dataset.action === 'updateExNotes') {
+        updateExNotes(+el.dataset.idx, el.value);
+      } else if (el.dataset.action === 'updateExSetup') {
+        updateExSetup(+el.dataset.idx, el.value);
+      }
+    });
+
+    // ── Delegated click: Modal Overlay (dynamic modal content) ─────────
+    $('modalOverlay').addEventListener('click', e => {
+      if (e.target === $('modalOverlay')) { hide($('modalOverlay')); return; }
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      if (action === 'closeOverlay') {
+        hide($('modalOverlay'));
+      } else if (action === 'deleteSession') {
+        deleteSession(btn.dataset.id);
+      } else if (action === 'removeExercise') {
+        removeExercise(+btn.dataset.day, +btn.dataset.ex);
+      } else if (action === 'addExercise') {
+        addExercisePrompt(+btn.dataset.day);
+      } else if (action === 'switchChartMetric') {
+        switchChartMetric(btn.dataset.value);
+      }
+    });
+
+    // ── Delegated click: History List ──────────────────────────────────
+    $('historyList').addEventListener('click', e => {
+      const session = e.target.closest('[data-action="showSession"]');
+      if (session) { showSessionDetail(session.dataset.id); return; }
+      const chart = e.target.closest('[data-action="showExChart"]');
+      if (chart) showExChart(chart.dataset.id);
+    });
+
+    // History tabs (moved from inline onclick to comply with CSP)
+    document.querySelectorAll('.hist-tab').forEach(tab => {
+      tab.addEventListener('click', () => renderHistoryTab(tab.dataset.tab));
+    });
+
     // Hardware back button (popstate) — closes modals or exits workout view
     window.addEventListener('popstate', (e) => {
+      if (!$('finishModal').classList.contains('hidden')) { hide($('finishModal')); return; }
       if (!$('infoModal').classList.contains('hidden')) { hide($('infoModal')); return; }
       if (!$('modalOverlay').classList.contains('hidden')) { hide($('modalOverlay')); return; }
       if (state.currentView === 'viewWorkout') { backFromWorkout(); return; }
     });
 
-    // Escape key support
+    // Escape key support — only closes the modal, does NOT call history.back()
+    // (history.back() would fire popstate which triggers backFromWorkout() if in workout view)
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (!$('infoModal').classList.contains('hidden')) { hide($('infoModal')); window.history.back(); return; }
-        if (!$('modalOverlay').classList.contains('hidden')) { hide($('modalOverlay')); window.history.back(); return; }
+        if (!$('finishModal').classList.contains('hidden')) { hide($('finishModal')); return; }
+        if (!$('infoModal').classList.contains('hidden')) { hide($('infoModal')); return; }
+        if (!$('modalOverlay').classList.contains('hidden')) { hide($('modalOverlay')); return; }
       }
     });
 
@@ -1842,7 +2291,7 @@
     try {
       const res = await fetch('https://api.github.com/user', {
         headers: {
-          'Authorization': 'token ' + token,
+          'Authorization': 'Bearer ' + token,
           'X-GitHub-Api-Version': '2022-11-28'
         }
       });
@@ -1864,7 +2313,7 @@
   window.app = {
     openWorkout, toggleExercise, updateSet, updateExNotes, updateExSetup, toggleSetDone, toggleActivityDone,
     showExInfo, showExChart, showSessionDetail, deleteSession, startTimer,
-    addExercisePrompt, removeExercise, setFeedback, switchChartMetric
+    addExercisePrompt, removeExercise, setFeedback, switchChartMetric, renderHistoryTab
   };
 
   // --- CSV Export ---
@@ -1909,27 +2358,23 @@
   function init() {
     loadState();
 
-    // Splash
-    setTimeout(() => {
-      $('splash').classList.add('fade-out');
-      $('app').classList.remove('hidden');
-      setTimeout(() => $('splash').remove(), 500);
-    }, 1400);
-
+    // Bind events and populate form first (synchronous, no DOM rendering yet)
     bindEvents();
     populateSettingsForm();
 
-    // Restore active workout if it existed (page was refreshed mid-workout)
-    if (state.activeSession) {
-      const days = getDays(state.activeSession.cycle);
-      const day = days[state.activeSession.dayIndex];
-      if (day) {
-        renderDashboard();
-        // Let the user resume via the draft check flow when they tap the day
-      }
+    // Render dashboard BEFORE splash exits so content is ready underneath
+    try {
+      renderDashboard();
+    } catch(e) {
+      console.error('Dashboard render error:', e);
     }
 
-    renderDashboard();
+    // Splash dismisses after content is ready — immune to render errors
+    setTimeout(() => {
+      $('splash').classList.add('fade-out');
+      $('app').classList.remove('hidden');
+      setTimeout(() => { const s = $('splash'); if(s) s.remove(); }, 500);
+    }, 1200);
 
     // Auto-pull from Gist on startup (after UI is ready)
     setTimeout(() => gistAutoSync(), 1600);

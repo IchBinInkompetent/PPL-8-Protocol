@@ -94,6 +94,14 @@ const TRAINING_PLAN = {
                 {
                     id: "a2e6", name: "Face Pulls", sets: 2, reps: "12-15", tempo: null, restSeconds: 60, note: "Rear Delts.",
                     guide: "Seil am Kabelzug auf Gesichtshöhe. Zum Gesicht ziehen, dabei Hände auseinanderrotieren (Außenrotation). Schulterblätter zusammenziehen. Trainiert hintere Schulter und externe Rotatoren – essentiell für Schultergesundheit."
+                },
+                {
+                    id: "a2e7", name: "Preacher DB Curls", sets: 3, reps: "8-12", tempo: null, restSeconds: 60, note: "Bizeps – Stretched Position.",
+                    guide: "Auf dem Preacher-Pult abgestützt, Oberarme flach auf der Auflage. Dumbbell kontrolliert absenken bis zur vollen Streckung – der Stretch am tiefsten Punkt ist der Hauptreiz. Konzentrisch fokussiert nach oben curclen, Ellenbogen bleibt auf dem Pult. Kein Schwung."
+                },
+                {
+                    id: "a2e8", name: "Incline DB Curls", sets: 2, reps: "10-15", tempo: null, restSeconds: 60, note: "Bizeps Long Head – maximaler Stretch.",
+                    guide: "Bank auf ca. 45–60° einstellen, zurücklehnen. Arme hängen frei nach hinten (Schulter in Extension) – das bringt den langen Bizepskopf in den maximalen Stretch. Kontrolliert curclen, Ellenbogen bleibt fixiert. Langsam absenken und den Stretch ausnutzen."
                 }
             ]
         },
@@ -192,6 +200,10 @@ const TRAINING_PLAN = {
                 {
                     id: "b6e5", name: "Y-Raises am Kabelzug", sets: 2, reps: "12-15", tempo: null, restSeconds: 60, note: "Lower Trap / Rotatoren.",
                     guide: "Am Kabelzug von unten. Arme in Y-Form nach oben-außen führen. Daumen zeigen nach oben. Aktiviert den unteren Trapezius und die externen Rotatoren. Wichtig für die Schultergesundheit und Skapula-Stabilität."
+                },
+                {
+                    id: "b6e6", name: "Hammer Curls", sets: 3, reps: "8-12", tempo: null, restSeconds: 60, note: "Brachialis & Bizeps – neutraler Griff.",
+                    guide: "Stehend, Dumbbells mit neutralem Griff (Handflächen zueinander). Ellenbogen bleibt am Körper fixiert. Kontrolliert nach oben curclen – der neutrale Griff aktiviert den Brachialis und den langen Bizepskopf stärker als der supinierte Griff. Langsam absenken."
                 }
             ]
         },
@@ -236,4 +248,63 @@ const TRAINING_PLAN = {
             ]
         }
     ]
+};
+
+// ============================================
+// MUSKELGRUPPEN-MAPPING
+// Jeder exercise-ID werden primäre Muskelgruppen zugeordnet.
+// Keys entsprechen den IDs in TRAINING_PLAN.
+// muscle keys: chest | front_delt | side_delt | rear_delt | triceps |
+//              lat | upper_back | biceps | core |
+//              quad | hamstring | glute | calf
+// ============================================
+const MUSCLE_MAP = {
+  // --- Zyklus A: Push A ---
+  a1e1: { chest: 3, front_delt: 1, triceps: 1 },
+  a1e2: { chest: 3, front_delt: 1 },
+  a1e3: { chest: 3 },
+  a1e4: { side_delt: 3 },
+  a1e5: { triceps: 3 },
+  a1e6: { core: 2 },
+
+  // --- Zyklus A: Pull A ---
+  a2e1: { lat: 3, core: 2 },
+  a2e2: { lat: 3, upper_back: 2, biceps: 1 },
+  a2e3: { lat: 3 },
+  a2e4: { upper_back: 3, rear_delt: 1 },
+  a2e5: { lat: 3 },
+  a2e6: { rear_delt: 3, upper_back: 1 },
+  a2e7: { biceps: 3 },
+  a2e8: { biceps: 3 },
+
+  // --- Zyklus A: Legs A ---
+  a3e1: { hamstring: 3, glute: 2 },
+  a3e2: { quad: 3, glute: 2 },
+  a3e3: { quad: 3 },
+  a3e4: { calf: 3 },
+  a3e5: { core: 3 },
+
+  // --- Zyklus B: Push B ---
+  b5e1: { quad: 1, glute: 1 },
+  b5e2: { chest: 3, front_delt: 1, triceps: 1 },
+  b5e3: { chest: 3, front_delt: 1, triceps: 1 },
+  b5e4: { front_delt: 3, triceps: 1 },
+  b5e5: { triceps: 3 },
+  b5e6: { core: 3 },
+
+  // --- Zyklus B: Pull B ---
+  b6e1: { upper_back: 3, rear_delt: 1 },
+  b6e2: { lat: 3 },
+  b6e3: { upper_back: 3 },
+  b6e4: { core: 3 },
+  b6e5: { upper_back: 2, rear_delt: 2 },
+  b6e6: { biceps: 3 },
+
+  // --- Zyklus B: Legs B ---
+  b7e1: {},
+  b7e2: { hamstring: 3 },
+  b7e3: { quad: 3 },
+  b7e4: { hamstring: 3, glute: 1 },
+  b7e5: { core: 3 },
+  b7e6: {},
 };

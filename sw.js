@@ -1,5 +1,5 @@
 // ============================================
-// PPL-8 SERVICE WORKER — v6
+// PPL-8 SERVICE WORKER — v7
 // Strategy:
 //   App Shell  → Network-First (HTML, CSS, JS, manifest) — always fresh
 //   Fonts/CDN  → Stale-While-Revalidate (serve cached, refresh in bg)
@@ -88,7 +88,14 @@ async function staleWhileRevalidate(request, cacheName) {
     return response;
   }).catch(() => null);
 
-  return cached || fetchPromise || offlineFallback(request);
+  // If we have a cached response, serve it and revalidate in background
+  if (cached) {
+    fetchPromise; // fire-and-forget background revalidation
+    return cached;
+  }
+  // No cache: await fetch result, fall back to offline page
+  const networkResponse = await fetchPromise;
+  return networkResponse || offlineFallback(request);
 }
 
 // Network-First with cache fallback

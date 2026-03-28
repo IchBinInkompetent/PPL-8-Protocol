@@ -135,13 +135,10 @@
   // --- Gist Cloud Sync ---
   const GIST_TOKEN_KEY = 'ppl8_gist_token';
   const GIST_ID_KEY    = 'ppl8_gist_id';
-  let _syncStatus = 'idle'; // idle | syncing | ok | error
-
   function gistGetToken() { return localStorage.getItem(GIST_TOKEN_KEY) || ''; }
   function gistGetId()    { return localStorage.getItem(GIST_ID_KEY) || ''; }
 
   function gistSetSyncStatus(status, msg) {
-    _syncStatus = status;
     const el = document.getElementById('syncStatus');
     if (!el) return;
     const icons = { idle: '☁️', syncing: '🔄', ok: '✅', error: '❌' };
@@ -242,7 +239,7 @@
       const gist = await res.json();
       const fileContent = gist.files['ppl8_data.json'] && gist.files['ppl8_data.json'].content;
       if (!fileContent) throw new Error('Datei nicht im Gist gefunden');
-      const remote = JSON.parse(fileContent);
+      const remote = migrateState(JSON.parse(fileContent));
 
       // Conflict resolution: merge sessions (union by id), remote wins for athlete/baseline if newer
       const localTime  = state.lastBackup ? new Date(state.lastBackup).getTime() : 0;
@@ -258,7 +255,6 @@
         return true;
       });
       mergedSessions.sort((a, b) => new Date(a.date) - new Date(b.date));
-      const remoteOnlySessions = (remote.sessions || []).filter(s => !localIds.has(s.id));
       if ((remote.sessions || []).some(s => localIds.has(s.id))) {
         console.info('Gist-Merge: Lokale Änderungen an vorhandenen Sessions behalten.');
       }
@@ -305,7 +301,7 @@
     }
   }
 
-    // --- Wake Lock ---
+  // --- Wake Lock ---
   async function requestWakeLock() {
     if (!('wakeLock' in navigator)) return;
     try {
@@ -364,7 +360,7 @@
   function getLastWeights(exId) {
     for (let i = state.sessions.length - 1; i >= 0; i--) {
       const ex = state.sessions[i].exercises.find(e => e.id === exId);
-      if (ex && ex.sets.some(s => s.weight)) return ex.sets;
+      if (ex && ex.sets && ex.sets.some(s => s.weight)) return ex.sets;
     }
     return null;
   }
@@ -476,6 +472,7 @@
   function calculateE1RM(weight, reps) {
     if (weight <= 0 || reps <= 0) return 0;
     if (reps === 1) return weight;
+    if (reps >= 37) return weight; // Brzycki undefined for reps >= 37; return raw weight
     // Brzycki formula
     return weight * (36 / (37 - reps));
   }
@@ -526,7 +523,7 @@
 
 
   // ============================================
-  // DASHBOARD 2.0 — Muskelgruppen-Heatmap
+  // DASHBOARD — Sätze / Zyklus pro Muskelgruppe
   // ============================================
 
   const MUSCLE_LABELS = {
@@ -545,63 +542,92 @@
     calf:       'Waden'
   };
 
-  function getMuscleVolume(days) {
-    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    const totals = {};
-    Object.keys(MUSCLE_LABELS).forEach(function(m) { totals[m] = 0; });
-    state.sessions.forEach(function(s) {
-      if (new Date(s.date).getTime() < cutoff) return;
-      s.exercises.forEach(function(ex) {
-        var map = (typeof MUSCLE_MAP !== 'undefined') ? MUSCLE_MAP[ex.id] : null;
+  /**
+   * Analyses the current training plan (not logged sessions) and returns
+   * per-muscle-group set totals with a full breakdown by day + exercise.
+   * Only counts primary movers (MUSCLE_MAP weight >= 2).
+   */
+  function getPlanSetsByMuscle() {
+    const plan = getPlan();
+    const allDays = [...plan.cycleA, ...plan.cycleB];
+    const result = {};
+    Object.keys(MUSCLE_LABELS).forEach(m => { result[m] = { total: 0, sources: [] }; });
+
+    allDays.forEach(day => {
+      day.exercises.forEach(ex => {
+        if (ex.noTracking) return;
+        const map = (typeof MUSCLE_MAP !== 'undefined') ? MUSCLE_MAP[ex.id] : null;
         if (!map) return;
-        var doneSets = ex.sets ? ex.sets.filter(function(st) { return st.done || st.reps; }).length : 0;
-        if (doneSets === 0) return;
-        Object.keys(map).forEach(function(muscle) {
-          totals[muscle] = (totals[muscle] || 0) + doneSets * map[muscle];
+        const sets = ex.sets || 0;
+        Object.keys(map).forEach(muscle => {
+          if (map[muscle] >= 2 && result[muscle]) {
+            result[muscle].total += sets;
+            result[muscle].sources.push({
+              day: day.day,
+              dayName: day.name,
+              exName: ex.name,
+              sets: sets
+            });
+          }
         });
       });
     });
-    return totals;
+    return result;
   }
 
-  function renderMuscleHeatmap(container) {
-    if (!container) return;
-    if (!state.sessions.length) {
-      container.innerHTML = '<p class="empty-state">Noch keine Trainingsdaten.</p>';
-      return;
-    }
-    var vol7  = getMuscleVolume(7);
-    var vol28 = getMuscleVolume(28);
-    var max28 = Math.max.apply(null, Object.values(vol28).concat([1]));
+  // Maps muscle keys to their training category for color coding
+  const MUSCLE_CATEGORY = {
+    chest: 'push', front_delt: 'push', side_delt: 'push', triceps: 'push',
+    lat: 'pull', upper_back: 'pull', rear_delt: 'pull', biceps: 'pull',
+    quad: 'legs', hamstring: 'legs', glute: 'legs', calf: 'legs',
+    core: 'core'
+  };
 
-    var rows = Object.keys(MUSCLE_LABELS).map(function(key) {
-      var label = MUSCLE_LABELS[key];
-      var v7  = vol7[key]  || 0;
-      var v28val = vol28[key] || 0;
-      var pct28 = Math.round((v28val / max28) * 100);
-      var pct7  = Math.min(Math.round((v7   / max28) * 100), 100);
-      var tier = 'heat-0';
-      if (pct28 > 0)  tier = 'heat-1';
-      if (pct28 > 25) tier = 'heat-2';
-      if (pct28 > 50) tier = 'heat-3';
-      if (pct28 > 75) tier = 'heat-4';
-      var trend = v7 > 0 ? '▲' : '';
-      return '<div class="muscle-row">' +
-        '<div class="muscle-label">' + label + '</div>' +
-        '<div class="muscle-bar-wrap">' +
-          '<div class="muscle-bar ' + tier + '" style="width:' + Math.max(pct28, 2) + '%">' +
-            '<div class="muscle-bar-7d" style="width:' + pct7 + '%"></div>' +
-          '</div>' +
-        '</div>' +
-        '<div class="muscle-vol">' + (v28val > 0 ? v28val : '–') + ' <span class="muscle-trend">' + trend + '</span></div>' +
+  function renderWeeklySets(container) {
+    if (!container) return;
+    const plan = getPlan();
+    // Build a dayType lookup: day number → type
+    const dayTypeMap = {};
+    [...plan.cycleA, ...plan.cycleB].forEach(d => { dayTypeMap[d.day] = d.type; });
+
+    const data = getPlanSetsByMuscle();
+    const maxSets = Math.max(...Object.values(data).map(d => d.total), 1);
+
+    const rows = Object.keys(MUSCLE_LABELS).map((key, idx) => {
+      const label = MUSCLE_LABELS[key];
+      const { total, sources } = data[key];
+      const pct = Math.round((total / maxSets) * 100);
+      const cat = MUSCLE_CATEGORY[key] || 'push';
+
+      const breakdownHtml = sources.map(s => {
+        const dtype = dayTypeMap[s.day] || 'push';
+        return '<div class="ws-source">' +
+          '<span class="ws-source-day ws-day-' + dtype + '">Tag ' + s.day + '</span>' +
+          '<span class="ws-source-name">' + esc(s.exName) + '</span>' +
+          '<span class="ws-source-sets">' + s.sets + 'x</span>' +
         '</div>';
+      }).join('');
+
+      return '<div class="ws-row" data-ws-idx="' + idx + '">' +
+        '<div class="ws-label">' + label + '</div>' +
+        '<div class="ws-bar-wrap">' +
+          '<div class="ws-bar ws-cat-' + cat + '" style="width:' + Math.max(pct, 3) + '%"></div>' +
+        '</div>' +
+        '<div class="ws-count ws-cat-' + cat + '">' + total + '</div>' +
+      '</div>' +
+      '<div class="ws-breakdown hidden" id="wsBreak_' + idx + '">' + breakdownHtml + '</div>';
     }).join('');
 
-    container.innerHTML =
-      '<div class="muscle-legend">' +
-        '<span class="legend-bar legend-28d"></span>28 Tage&nbsp;&nbsp;' +
-        '<span class="legend-bar legend-7d"></span>7 Tage' +
-      '</div>' + rows;
+    container.innerHTML = rows;
+
+    // Toggle breakdown on row click
+    container.querySelectorAll('.ws-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const idx = row.dataset.wsIdx;
+        const bd = document.getElementById('wsBreak_' + idx);
+        if (bd) bd.classList.toggle('hidden');
+      });
+    });
   }
 
 
@@ -640,7 +666,7 @@
     renderWeeklyVolume();
     renderRecentSessions();
     renderHeatmap();
-    try { renderMuscleHeatmap(document.getElementById('muscleHeatmapContainer')); } catch(e) { console.warn('Muscle heatmap:', e); }
+    try { renderWeeklySets(document.getElementById('weeklySetsContainer')); } catch(e) { console.warn('Weekly sets:', e); }
 
   }
 
@@ -686,7 +712,7 @@
     const days = getDays(state.currentCycle);
     const grid = $('dayGrid');
     grid.innerHTML = days.map((d, i) => `
-    <div class="day-card ${d.type === 'rest' ? 'rest' : ''}" data-action="openWorkout" data-cycle="${esc(state.currentCycle)}" data-day="${i}">
+    <div class="day-card type-${esc(d.type)}" data-action="openWorkout" data-cycle="${esc(state.currentCycle)}" data-day="${i}">
       <div class="day-number">Tag ${d.day}</div>
       <div class="day-name">${esc(d.name)}</div>
       <div class="day-detail">${esc(d.subtitle)}</div>
@@ -742,26 +768,34 @@
       sessionMap[dStr] = (sessionMap[dStr] || 0) + 1;
     });
 
-    let html = '';
+    const dayLabels = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+    let labelsHtml = dayLabels.map(l => `<div class="heatmap-day-label">${l}</div>`).join('');
+
+    let squaresHtml = '';
     finalCells.forEach(day => {
       if (!day) {
-        // Invisible padding cell
-        html += `<div class="heatmap-square" style="background: transparent; box-shadow: none;"></div>`;
+        squaresHtml += `<div class="heatmap-square" style="background: transparent; box-shadow: none;"></div>`;
         return;
       }
-      
+
       const count = sessionMap[day.dateStr] || 0;
       let level = 0;
       if (count === 1) level = 1;
       if (count >= 2) level = 2;
       const tooltip = `${day.date.toLocaleDateString('de-DE')} - ${count} Workout(s)`;
-      html += `<div class="heatmap-square level-${level}" title="${tooltip}"></div>`;
+      squaresHtml += `<div class="heatmap-square level-${level}" title="${tooltip}"></div>`;
     });
 
-    container.innerHTML = html;
+    container.innerHTML = `
+      <div class="heatmap-outer">
+        <div class="heatmap-day-labels">${labelsHtml}</div>
+        <div class="heatmap-container" id="heatmapGrid">${squaresHtml}</div>
+      </div>
+    `;
 
     setTimeout(() => {
-      container.scrollLeft = container.scrollWidth;
+      const grid = $('heatmapGrid');
+      if (grid) grid.scrollLeft = grid.scrollWidth;
     }, 10);
   }
 
@@ -796,18 +830,26 @@
       if (type === 'legs') volLegs += totalVol;
     });
 
+    const maxVol = Math.max(volPush, volPull, volLegs, 1);
+    const pctPush = Math.round((volPush / maxVol) * 100);
+    const pctPull = Math.round((volPull / maxVol) * 100);
+    const pctLegs = Math.round((volLegs / maxVol) * 100);
+
     container.innerHTML = `
-      <div class="vol-stat">
+      <div class="vol-stat vol-push">
         <div class="vol-val">${(volPush / 1000).toFixed(1)}t</div>
         <div class="vol-label">Push</div>
+        <div class="vol-bar-wrap"><div class="vol-bar" style="width:${pctPush}%"></div></div>
       </div>
-      <div class="vol-stat">
+      <div class="vol-stat vol-pull">
         <div class="vol-val">${(volPull / 1000).toFixed(1)}t</div>
         <div class="vol-label">Pull</div>
+        <div class="vol-bar-wrap"><div class="vol-bar" style="width:${pctPull}%"></div></div>
       </div>
-      <div class="vol-stat">
+      <div class="vol-stat vol-legs">
         <div class="vol-val">${(volLegs / 1000).toFixed(1)}t</div>
         <div class="vol-label">Legs</div>
+        <div class="vol-bar-wrap"><div class="vol-bar" style="width:${pctLegs}%"></div></div>
       </div>
     `;
   }
@@ -815,7 +857,7 @@
   function renderRecentSessions() {
     const list = $('recentList');
     if (!state.sessions.length) {
-      list.innerHTML = '<p class="empty-state">Noch keine Trainings aufgezeichnet.</p>';
+      list.innerHTML = '<div class="empty-state"><span class="empty-state-icon">📊</span>Noch keine Trainings aufgezeichnet.<div class="empty-state-hint">Starte dein erstes Workout im Trainingsplan.</div></div>';
       return;
     }
     const recent = state.sessions.slice(-5).reverse();
@@ -838,10 +880,10 @@
         <h3>Hinweis</h3>
       </div>
       <div class="modal-body">
-        <p style="font-size:0.9rem;line-height:1.55;color:var(--text-secondary);margin-bottom:var(--gap-md);">${message}</p>
+        <p style="font-size:0.9rem;line-height:1.55;color:var(--text-secondary);margin-bottom:var(--gap-md);">${esc(message)}</p>
         <div style="display:flex;gap:var(--gap-sm);justify-content:flex-end;">
-          <button class="btn btn-outline btn-sm" id="confirmCancel">${cancelLabel}</button>
-          <button class="btn btn-primary btn-sm" id="confirmOk">${confirmLabel}</button>
+          <button class="btn btn-outline btn-sm" id="confirmCancel">${esc(cancelLabel)}</button>
+          <button class="btn btn-primary btn-sm" id="confirmOk">${esc(confirmLabel)}</button>
         </div>
       </div>
     `;
@@ -1062,7 +1104,7 @@
         </div>
         <div class="set-notes" style="margin-top:8px">
           <input type="text" class="input-field" placeholder="Notizen..." id="notes_${i}"
-            value="${sessionEx.notes || ''}"
+            value="${esc(sessionEx.notes || '')}"
             data-action="updateExNotes" data-idx="${i}">
         </div>
       </div>
@@ -1070,19 +1112,19 @@
   `;
       }
 
-      // --- Regular tracked exercises ---
+      // --- Regular tracked exercises (weight, reps, RIR) ---
       const numSets = sessionEx.sets.length;
 
       let recommendOverload = false;
       const cachedSets = getLastWeights(ex.id);
       if (cachedSets && cachedSets.length > 0) {
-        const targetRepsMatch = ex.reps.match(/(\d+)(?:\/[^\d]*)?$/);
-        const targetReps = targetRepsMatch ? parseInt(targetRepsMatch[1]) : 0;
-        if (targetReps > 0) {
+        const repMatch = ex.reps.match(/(\d+)(?:[^\d]+(\d+))?/);
+        const repHigh = repMatch && repMatch[2] ? parseInt(repMatch[2]) : (repMatch ? parseInt(repMatch[1]) : 0);
+        if (repHigh > 0) {
           for (let s of cachedSets) {
             const dReps = parseInt(s.reps) || 0;
             const dRir = parseInt(s.rir);
-            if (dReps >= targetReps && (isNaN(dRir) || dRir >= 1)) {
+            if (dReps >= repHigh && (isNaN(dRir) || dRir >= 1)) {
               recommendOverload = true;
               break;
             }
@@ -1113,7 +1155,7 @@
         
         <div class="exercise-setup">
           <label class="setup-label">Geräte-Setup / Sitz Position</label>
-          <input type="text" class="input-field input-setup" placeholder="z.B. Sitz 4, Winkel 30°, Pin 3..." value="${sessionEx.setup || ''}" data-action="updateExSetup" data-idx="${i}">
+          <input type="text" class="input-field input-setup" placeholder="z.B. Sitz 4, Winkel 30°, Pin 3..." value="${esc(sessionEx.setup || '')}" data-action="updateExSetup" data-idx="${i}">
         </div>
 
         ${(() => {
@@ -1209,7 +1251,7 @@
         })()}
         <div class="set-notes">
           <input type="text" class="input-field" placeholder="Notizen..." id="notes_${i}"
-            value="${sessionEx.notes || ''}"
+            value="${esc(sessionEx.notes || '')}"
             data-action="updateExNotes" data-idx="${i}">
         </div>
       </div>
@@ -1561,7 +1603,7 @@
     });
 
     if (!state.sessions.length) {
-      list.innerHTML = '<p class="empty-state">Noch keine Trainings aufgezeichnet.</p>';
+      list.innerHTML = '<div class="empty-state"><span class="empty-state-icon">📊</span>Noch keine Trainings aufgezeichnet.<div class="empty-state-hint">Starte dein erstes Workout im Trainingsplan.</div></div>';
       return;
     }
 
@@ -1631,7 +1673,7 @@
 
     // Build selector + chart area
     const exerciseOptions = Array.from(exerciseMap.entries())
-      .map(([id, name]) => `<option value="${id}">${name}</option>`).join('');
+      .map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join('');
 
     container.innerHTML = `
         <div class="card card-chart">
@@ -2270,24 +2312,20 @@
   }
 
   // --- Public API ---
-  // Expose gist functions globally for inline onclick handlers
-  window.gistPushData     = gistPush;
-  window.gistPullData     = gistPull;
-  window.gistSaveSettings = saveGistSettings;
-  window.gistDiagnose     = async function() {
+  window.gistDiagnose = async function() {
     const tokenEl = document.getElementById('gistTokenInput');
     const token   = (tokenEl && tokenEl.value.trim()) || gistGetToken();
-    const toastEl = document.getElementById('toast');
-    const msgEl   = document.getElementById('toastMsg');
-    const show    = (msg, dur) => {
+    const diagToast = (msg, dur) => {
+      const toastEl = document.getElementById('toast');
+      const msgEl   = document.getElementById('toastMsg');
       msgEl.textContent = msg;
       toastEl.style.cursor = '';
       toastEl.classList.remove('hidden');
       if (dur !== 0) setTimeout(() => toastEl.classList.add('hidden'), dur || 4000);
     };
 
-    if (!token) { show('⚠️ Kein Token im Feld – bitte eintragen und Token speichern drücken', 4000); return; }
-    show('🔄 Teste GitHub API…', 0);
+    if (!token) { diagToast('⚠️ Kein Token im Feld – bitte eintragen und Token speichern drücken', 4000); return; }
+    diagToast('🔄 Teste GitHub API…', 0);
     try {
       const res = await fetch('https://api.github.com/user', {
         headers: {
@@ -2297,23 +2335,17 @@
       });
       const body = await res.json().catch(() => ({}));
       if (res.ok) {
-        show('✅ Token gültig! User: ' + (body.login || '?') + ' – jetzt Push versuchen', 4000);
+        diagToast('✅ Token gültig! User: ' + (body.login || '?') + ' – jetzt Push versuchen', 4000);
       } else if (res.status === 401) {
-        show('❌ 401: Token ungültig oder abgelaufen. Neu generieren.', 5000);
+        diagToast('❌ 401: Token ungültig oder abgelaufen. Neu generieren.', 5000);
       } else if (res.status === 403) {
-        show('❌ 403: Zugriff verweigert. Gist-Berechtigung prüfen.', 5000);
+        diagToast('❌ 403: Zugriff verweigert. Gist-Berechtigung prüfen.', 5000);
       } else {
-        show('❌ HTTP ' + res.status + ': ' + (body.message || 'Unbekannter Fehler'), 5000);
+        diagToast('❌ HTTP ' + res.status + ': ' + (body.message || 'Unbekannter Fehler'), 5000);
       }
     } catch(e) {
-      show('❌ Netzwerkfehler: ' + e.message + ' (CORS?)', 6000);
+      diagToast('❌ Netzwerkfehler: ' + e.message + ' (CORS?)', 6000);
     }
-  };
-
-  window.app = {
-    openWorkout, toggleExercise, updateSet, updateExNotes, updateExSetup, toggleSetDone, toggleActivityDone,
-    showExInfo, showExChart, showSessionDetail, deleteSession, startTimer,
-    addExercisePrompt, removeExercise, setFeedback, switchChartMetric, renderHistoryTab
   };
 
   // --- CSV Export ---
@@ -2337,9 +2369,10 @@
             armSide = i < (ex.sets.length / 2) ? 'Links' : 'Rechts';
           }
 
-          const cleanNotes = (set.notes || '').replace(/"/g, '""'); // escape quotes for CSV
+          const csvEsc = (s) => (s || '').replace(/"/g, '""');
+          const cleanNotes = csvEsc(set.notes);
 
-          csv += `"${dateStr}","${session.cycle}","${session.dayName}","${ex.name}",${i + 1},"${armSide}","${set.weight || 0}","${set.reps || 0}","${set.rir || ''}","${cleanNotes}","${set.feedback || ''}"\n`;
+          csv += `"${dateStr}","${csvEsc(session.cycle)}","${csvEsc(session.dayName)}","${csvEsc(ex.name)}",${i + 1},"${armSide}","${set.weight || 0}","${set.reps || 0}","${set.rir || ''}","${cleanNotes}","${set.feedback || ''}"\n`;
         });
       });
     });

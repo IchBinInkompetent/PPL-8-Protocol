@@ -123,7 +123,7 @@
             <span class="card-icon">🔥</span>
             <h3>Consistency (90 Tage)</h3>
           </div>
-          <div class="heatmap-container" id="heatmapContainer">
+          <div id="heatmapContainer">
             <!-- Filled by JS -->
           </div>
         </div>
@@ -135,19 +135,17 @@
             <h3>Letzte Trainings</h3>
           </div>
           <div class="recent-list" id="recentList">
-            <p class="empty-state">Noch keine Trainings aufgezeichnet.</p>
+            <div class="empty-state"><span class="empty-state-icon">📊</span>Noch keine Trainings aufgezeichnet.<div class="empty-state-hint">Starte dein erstes Workout im Trainingsplan.</div></div>
           </div>
         </div>
 
-        <!-- Muscle Group Heatmap -->
-        <div class="card card-muscle-heatmap">
+        <!-- Weekly Sets per Muscle Group (Plan-based) -->
+        <div class="card card-weekly-sets">
           <div class="card-header">
             <span class="card-icon">🦾</span>
-            <h3>Muskelgruppen-Auslastung</h3>
+            <h3>Sätze / Zyklus (8 Tage)</h3>
           </div>
-          <div class="muscle-heatmap-container" id="muscleHeatmapContainer">
-            <p class="empty-state">Noch keine Trainingsdaten.</p>
-          </div>
+          <div class="weekly-sets-container" id="weeklySetsContainer"></div>
         </div>
 
 
@@ -230,7 +228,7 @@
           <button class="hist-tab" data-tab="prs">PRs</button>
         </div>
         <div class="history-list" id="historyList">
-          <p class="empty-state">Noch keine Trainings aufgezeichnet.</p>
+          <div class="empty-state"><span class="empty-state-icon">📊</span>Noch keine Trainings aufgezeichnet.<div class="empty-state-hint">Starte dein erstes Workout im Trainingsplan.</div></div>
         </div>
       </section>
 
